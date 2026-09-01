@@ -1,275 +1,511 @@
-# omni-relay
+# omni-relay 应转尽转·业务管线编排器
 
-将任意**源站 API**(对方控制契约)包装并绑定到**商品 API**(我方控制契约)的 npm 库。
-一等公民有两种:**源站卡片**(对接侧插件,声明"能连接哪个源站、提供哪些原子字段")与**商品卡片**(业务侧,引用源站卡片并计算派生出参);中介**总线**是框架按字段审计/注入/屏蔽的介入面;框架分为**服务面**(执行数据管道)与**控制面**(卡片生命周期,二次开发者责任域)。
+> 以**商品卡片**为一等公民的 API 绑定框架：把任意源站 API 包装、绑定为对外稳定的商品 API；**中介总线**是框架按字段审计 / 注入 / 屏蔽的介入面。
 
-```txt
-┌─ 控制面(二次开发者)───────────────────────────────────────────┐
-│  registerSource(ref → 物理绑定)                                  │
-│  registerSourceCard(源站卡片) ──校验链──→ 源站注册表(中心化)      │
-│  registerCard(商品卡片)       ──校验链──→ 服务目录                │
-│  setRuntimeConfig / setPolicy                                    │
-└──────────────┬─────────────────────────────────────────────────┘
-               │ 注册产物(版本化,原子切换)
-┌─ 服务面 ─────▼─────────────────────────────────────────────────┐
-│ relay.handle → [in → toGlue → glue → 钩子req                    │
-│                 → per-source: bind → input校验 → take → request校验│
-│                   → transport → upstreamRes校验 → put → output校验│
-│                   → 钩子res → res.<id>]                         │
-│                 → fromGlue → out]                               │
-│              共享总线:req / res.<srcId> / out / err              │
-└────────────────────────────────────────────────────────────────┘
+![license](https://img.shields.io/badge/license-MIT-blue)
+![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![zod](https://img.shields.io/badge/peer-zod%20%5E4-3178c6)
+![module](https://img.shields.io/badge/module-ESM%20%2B%20CJS-orange)
+
+---
+
+## 目录
+
+- [为什么需要它](#为什么需要它)
+- [核心概念](#核心概念)
+- [数据流：一次 handle 发生了什么](#数据流一次-handle-发生了什么)
+- [快速开始](#快速开始)
+- [指南](#指南)
+  - [源站卡片（对接侧插件）](#源站卡片对接侧插件)
+  - [商品卡片（业务侧）](#商品卡片业务侧)
+  - [注入与脱敏](#注入与脱敏)
+  - [多源站策略与重试](#多源站策略与重试)
+  - [流式透传（SSE）](#流式透传sse)
+  - [manifest 与版本治理](#manifest-与版本治理)
+  - [框架钩子与接缝中间件](#框架钩子与接缝中间件)
+  - [暴露为 fetch handler](#暴露为-fetch-handler)
+  - [测试](#测试)
+- [校验点与错误码](#校验点与错误码)
+- [API 参考](#api-参考)
+- [设计原则](#设计原则)
+- [项目结构](#项目结构)
+- [开发](#开发)
+- [License](#license)
+
+---
+
+## 为什么需要它
+
+当你需要把**多个异构上游源站**聚合成一套**对外稳定的商品 API** 时，会反复遇到同一批问题：
+
+- 每个上游的入参、鉴权、字段命名、错误码都不一样，脏字段容易泄漏到对外契约里；
+- 需要在转发链路里做**审计、脱敏、注入**，但这些治理动作不该和业务逻辑缠在一起；
+- 上游会超时、限流、宕机，需要**重试与容灾切换**，且要能区分「可重试」与「业务性失败」；
+- 对接侧和业务侧往往是不同的人，**对接逻辑**（怎么连一个源站）和**业务逻辑**（怎么组合成商品）需要解耦、独立演进与版本化。
+
+omni-relay 的回答是**卡片化 + 总线介入 + 双平面分离**：
+
+- 每个能力都是一张可独立声明、注册、版本化、退役的**卡片**；
+- 转发链路收敛为一条**中介总线**，框架主权（审计/注入/屏蔽）住在总线上；
+- **控制面**负责治理（注册/绑定/注入/策略/审计），**服务面**负责执行（`handle` / `fetch`），两者分离，原子切换不断服。
+
+---
+
+## 核心概念
+
+| 概念 | 说明 | 定义方式 |
+| --- | --- | --- |
+| **源站卡片** | 对接侧插件：封装「连接一个源站 + 清洗为原子字段」。声明能力契约（需要什么入参、能提供哪些原子字段），**不知道谁消费**。 | `defineSource()` |
+| **商品卡片** | 业务侧：对外稳定的商品 API 契约。经 `sources` **引用**源站卡片，只做参数映射与计算派生，**不接触源站细节**。 | `defineCard()` |
+| **中介总线（Bus）** | 贯穿一次执行的三分区数据结构：`req`（商品入参）/ `res.<id>`（各源站命名空间）/ `out`（商品出参），外加 `err`。框架按字段审计/注入/屏蔽的介入面。 | 框架内部构造 |
+| **字段标记** | `inject()` 声明 extension 字段（注册期由控制面注入）；`redact()` 声明 core 字段在审计摘要中脱敏。 | `inject` / `redact` |
+| **管道接缝（Seam）** | `toGlue` / `bind` / `take` / `put` / `fromGlue` 五个接缝，中间件声明作用于哪个接缝。 | `middlewares` |
+| **控制面** | 卡片生命周期、源站绑定、配置注入、策略覆盖、审计、版本门禁。 | `RelayController` |
+| **服务面** | 程序化调用 `handle`，或暴露为框架无关的 `fetch` handler。 | `Relay` |
+
+**双层卡片**是理解 omni-relay 的关键：源站卡片是「标准化的对接模块」，商品卡片是「顶层业务」；对接者向中心化注册表注册自己的能力，业务卡片按名引用，两侧解耦、各自演进。
+
+---
+
+## 数据流：一次 handle 发生了什么
+
+```
+商品入参
+  │  ▸ 校验点 in
+  ▼
+toGlue  →  合成 inject 字段  →  ▸ 校验点 glue  →  bus.req
+  │        [钩子 onBusReq、toGlue 中间件：审计 / 注入 / 屏蔽]
+  ▼
+per-source 段（策略：firstSuccess / race / all）
+  bind → ▸input → take → ▸request → transport（超时 / 重试 / 业务错误映射）
+       → ▸upstreamRes → put → ▸output → bus.res.<id>
+  │        [钩子 onBusRes、bind / take / put 中间件]
+  ▼
+fromGlue（聚合 res 各命名空间）  →  ▸out  →  bus.out  →  商品出参
 ```
 
-## 安装
+- **总线贯穿全程**：任何一跳失败都收敛为 `GlueError`，挂到 `bus.err` 后抛出；
+- **校验点默认全开**：`handle(name, input, { strict: false })` 可整体跳过（脏数据直通）；
+- **框架钩子置于接缝最外层**：`next()` 后可审计/屏蔽产物，卡片中间件无法覆盖框架主权。
 
-```bash
-npm i omni-relay zod   # zod ^4 为 peer dependency
-```
-
-要求 Node ≥ 18(标准 fetch,天然兼容 Edge/Bun/Workers)。
+---
 
 ## 快速开始
 
-### 1. 定义源站卡片(对接侧插件)
+### 安装
 
-对接者声明"需要什么入参、能提供哪些原子字段",不知道谁消费:
+```bash
+pnpm add omni-relay zod      # zod 是 peer 依赖（^4.0.0），需一并安装
+# 或 npm i omni-relay zod
+```
+
+要求 Node >= 18。产物同时提供 ESM / CJS / 类型声明。
+
+### 最小示例
 
 ```ts
-// examples/sku-detail/index.ts
 import { z } from 'zod';
-import { defineSource } from 'omni-relay';
+import { defineCard, defineSource, inject, redact, RelayController } from 'omni-relay';
 
-export const jdItemDetail = defineSource({
+// 1) 源站卡片：封装「连接一个源站 + 清洗为原子字段」（对接侧插件）
+const jdItemDetail = defineSource({
   meta: { name: 'jd.item-detail', version: '1.0.0' },
-  ref: 'jd/items/detail',                 // 物理绑定引用(控制面注入)
+  ref: 'jd/items/detail',                    // 逻辑 ref，控制面据此绑定物理地址
 
-  input:  z.object({ skuId: z.string() }), // 入参契约(可含分支字段)
-  output: z.object({                       // 原子字段契约(对接者承诺)
-    title: z.string(), priceCents: z.number(), inStock: z.boolean(),
+  input: z.object({ skuId: z.string() }),    // 我需要什么入参
+  output: z.object({                         // 我能提供哪些原子字段
+    title: z.string(),
+    priceCents: z.number(),
+    inStock: z.boolean(),
   }),
-  upstreamRes: z.object({ item_name: z.string(), price: z.number(), stock: z.number() }),
+  upstreamRes: z.object({                    // 源站原始响应契约（照抄对方文档）
+    item_name: z.string(),
+    price: z.number(),
+    stock: z.number(),
+  }),
 
-  take: ({ skuId }) => ({ method: 'GET', path: '/v2/items/:skuId', params: { skuId } }),
-  put:  (raw) => ({ title: raw.item_name, priceCents: Math.round(raw.price * 100), inStock: raw.stock > 0 }),
-  errorMap: {
-    extract: (b) => b?.error?.code,
+  take: ({ skuId }) => ({                    // 源站入参 → 源站请求（path 支持 :param）
+    method: 'GET' as const,
+    path: '/v2/items/:skuId',
+    params: { skuId },
+    query: { fmt: 'json' },
+  }),
+  put: (raw) => ({                           // 源站响应 → 原子字段（脏字段挡在总线之外）
+    title: raw.item_name,
+    priceCents: Math.round(raw.price * 100),
+    inStock: raw.stock > 0,
+  }),
+  errorMap: {                                // 源站业务错误 → 规范化码
+    extract: (body) => (body as any)?.error?.code,
     map: { ITEM_NOT_FOUND: 'PRODUCT_NOT_FOUND', 'HTTP:404': 'PRODUCT_NOT_FOUND' },
     fallback: 'UPSTREAM_UNKNOWN',
   },
 });
-```
 
-### 2. 定义商品卡片(引用源站卡片,计算派生)
-
-```ts
-import { defineCard, inject, redact } from 'omni-relay';
-
+// 2) 商品卡片：对外稳定的商品 API（业务侧，只做映射与派生）
 const skuDetail = defineCard({
   meta: { name: 'product.detail', version: '1.0.0' },
 
-  in:  z.object({ sku: z.string(), count: z.number().int().positive().default(1) }),
+  in: z.object({ sku: z.string(), count: z.number().int().positive().default(1) }),
   out: z.object({ name: z.string(), cents: z.number(), available: z.boolean() }),
 
-  // 总线 req 区 schema(显式声明,框架按字段操作的事实来源)
-  glue: z.object({
+  glue: z.object({                           // 总线 req 区：框架按字段审计 / 注入 / 屏蔽
     skuId: z.string(),
     quantity: z.number(),
-    tenantId: inject(z.string()),    // extension:控制面注册期注入
-    internalTag: redact(z.string()), // core:审计摘要自动脱敏
+    tenantId: inject(z.string()),            // extension：注册期由运行时配置注入
+    internalTag: redact(z.string()),         // core：审计摘要自动脱敏
   }),
 
-  // 入参 → 总线(只写 core 字段;inject 字段由框架合成,类型上被排除)
   toGlue: ({ sku, count }) => ({ skuId: sku, quantity: count ?? 1, internalTag: `tag:${sku}` }),
-
-  // 源站卡片引用:bind 把总线数据映射为源站入参
   sources: [{ source: jdItemDetail, id: 'jd', bind: (g) => ({ skuId: g.skuId }) }],
-
-  // 总线 → 出参(读取源站原子字段,计算派生;多源站聚合时在此显式合并)
-  fromGlue: (_g, res) => ({ name: res.jd.title, cents: res.jd.priceCents, available: res.jd.inStock }),
+  fromGlue: (_g, res) => ({
+    name: res.jd.title,
+    cents: res.jd.priceCents,
+    available: res.jd.inStock,
+  }),
 });
 
-export default skuDetail;
+// 3) 控制面：绑定物理源站 → 注册卡片 → 注入配置 → 上线
+const controller = new RelayController();
+controller
+  .registerSource('jd/items/detail', {
+    baseURL: 'https://api.jd.example.com',
+    auth: () => process.env.JD_TOKEN!,       // 惰性取用，值不进总线、不进日志摘要
+  })
+  .registerSourceCard(jdItemDetail)
+  .registerCard(skuDetail)
+  .setRuntimeConfig('product.detail', { tenantId: 'T-01' });
+
+const relay = controller.buildRelay();       // 上线门：注入字段齐备才产出 Relay
+
+// 4) 服务面：程序化调用（成功返回 out，失败抛 GlueError）
+const out = await relay.handle('product.detail', { sku: 'A1' });
+// → { name: 'X', cents: 990, available: true }
 ```
 
-`bind` 的返回值由源站卡片 `input` 推导,`fromGlue` 的 `res.<id>` 由源站卡片 `output` 推导——"对不上"在编译期就报错。
+> 完整可运行示例见 [`examples/sku-detail/`](./examples/sku-detail)。
 
-### 3. manifest(强制配置文件)
+---
 
-```jsonc
-// examples/sku-detail/card.json
+## 指南
+
+### 源站卡片（对接侧插件）
+
+`defineSource()` 声明「怎么连一个源站、能清洗出哪些原子字段」。对接者只声明能力契约，**不知道谁消费**；注册进中心化注册表后，任何商品卡片均可按名引用。
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `meta` | 是 | `{ name, version }`，卡片契约身份 |
+| `ref` | 是 | 逻辑 ref，控制面经 `registerSource` 注入物理绑定 |
+| `input` | 是 | 源站入参契约（可含分支字段，由 `take` 按值路由端点） |
+| `output` | 是 | 原子字段契约（对接者的承诺；流式源站惯例 `z.custom<ReadableStream>`） |
+| `upstreamRes` | 是 | 源站原始响应 schema（照抄对方文档） |
+| `take` | 是 | 源站入参 → `UpstreamRequest`（`method` / `path` / `params` / `query` / `headers` / `body`） |
+| `put` | 否* | 源站响应 → 原子字段；声明 `stream` 的源站可省略（流直写） |
+| `request` | 否 | 源站请求契约，用于**子集校验** `take` 产物（只验不重建） |
+| `errorMap` | 否 | `{ extract, map, fallback, retryableCodes }`，源站业务错误映射 |
+| `stream` | 否 | 声明流式透传：`event-stream` 响应旁路校验 |
+
+`errorMap` 的解析顺序：`extract(body)` 提取源站码 → 查 `map[code]` → 查 `map["HTTP:<status>"]` → 非 2xx 兜底 `fallback`（缺省 `UPSTREAM_UNKNOWN`）。命中 `retryableCodes` 的映射码会驱动重试。
+
+### 商品卡片（业务侧）
+
+`defineCard()` 声明「5 件套 + 出参」，`sources` 是对源站卡片的引用：
+
+| 字段 | 说明 |
+| --- | --- |
+| `in` / `out` | 商品 API 的入参 / 出参契约（我们定义） |
+| `glue` | 总线 `req` 区 schema（`z.object`），框架按字段操作的对象 |
+| `toGlue` | 入参 → 总线；**只写 core 字段**，`inject` 字段由框架合成（类型上已被排除） |
+| `sources` | `SourceCardRef[]`：`{ source, id, bind }`，`id` 是总线 `res.<id>` 命名空间键，`bind` 把总线数据映射为源站入参 |
+| `fromGlue` | 总线 → 出参；多源站聚合时显式合并各命名空间（`res.a` / `res.b` …） |
+| `middlewares` | 接缝中间件（见下） |
+
+声明期即做自洽校验：`glue` 非 `z.object`、`sources` 为空、`id` 重复、`bind` 缺失、中间件非法等「对不上」都在 `defineCard` / `defineSource` **就地报错**（`RegistrationError`），不留到运行时。
+
+### 注入与脱敏
+
+```ts
+glue: z.object({
+  tenantId: inject(z.string()),      // extension：值由控制面注册期注入，toGlue 不负责
+  apiKey: redact(z.string()),        // core：审计摘要 / digest 中自动打码（***xx）
+})
+```
+
+- **`inject`**：声明「运行时差异」字段（租户、密钥、区域等）。`toGlue` 类型上被排除这些字段，框架在合成 `bus.req` 时从 `setRuntimeConfig` 取值填入；`take` / `fromGlue` 可信任其存在。`buildRelay()` 会校验所有 `inject` 字段均可满足，否则拒绝上线。
+- **`redact`**：声明「敏感」core 字段。`Bus.digest()` 递归打码，供审计/日志消费；源站原始响应体 `raw` 永不进入摘要，也永不透出商品侧。
+
+注入是**注册期静态**的（每次 `setRuntimeConfig` 更新）；请求期的动态数据一律由 `toGlue` 写入。
+
+### 多源站策略与重试
+
+一张商品卡片可引用多个源站卡片。策略由 `manifest.suggests` 建议、控制面 `setPolicy` 覆盖（**框架主权**）：
+
+| 策略 | 行为 |
+| --- | --- |
+| `firstSuccess`（默认） | 顺序执行；**仅 `retryable` 错误**切换下一个源站，业务性失败直接抛出 |
+| `race` | 并发执行，首个成功者胜出（全部失败时抛聚合错误的第一个） |
+| `all` | 全部执行（聚合场景，`fromGlue` 合并各命名空间） |
+
+重试由 `RetryPolicy { max, backoff: 'fixed' | 'expo' }` 控制。`retryable` 是重试/切换源站的**唯一信号**：传输层 `TIMEOUT` / `NETWORK` 天然可重试，业务错误需命中 `errorMap.retryableCodes` 才可重试。
+
+```ts
+controller.setPolicy('product.detail', {
+  timeoutMs: 3000,
+  retry: { max: 2, backoff: 'expo' },
+  strategy: 'firstSuccess',
+});
+```
+
+解析优先级：`setPolicy` 覆盖 > `manifest.suggests` > 框架默认（`timeoutMs` 兜底为 `defaultTimeoutMs`，缺省 10s；`retry` 缺省 `{ max: 0 }`；`strategy` 缺省 `firstSuccess`）。
+
+### 流式透传（SSE）
+
+源站卡片声明 `stream: true` 后，`text/event-stream` 响应**旁路校验**、`put` 可省略，流直写 `res.<id>`；商品卡片 `out` 声明为 `z.custom<ReadableStream<Uint8Array>>()`，`fromGlue` 直通即可。
+
+```ts
+const llmChat = defineSource({
+  meta: { name: 'openai.chat', version: '1.0.0' },
+  ref: 'llm/openai',
+  stream: true,                                  // 旁路校验是显式授予的特权
+  input: z.object({ prompt: z.string() }),
+  upstreamRes: z.custom<ReadableStream<Uint8Array>>(),
+  output: z.custom<ReadableStream<Uint8Array>>(),
+  take: ({ prompt }) => ({
+    method: 'POST' as const,
+    path: '/v1/chat/completions',
+    body: { prompt, stream: true },
+  }),
+  // put 省略：流直写 res.<id>
+});
+```
+
+- **未声明 `stream` 却收到流式响应** → `GLUE.BUSINESS.UPSTREAM_STREAM_UNDECLARED`（拒绝静默旁路）；
+- 超时只覆盖到**流建立**，消费期不受 `timeoutMs` 限制；
+- 失败/切换时会 `cancel()` 已建立但未消费的流，防连接悬挂；
+- 经 `toFetchHandler` 暴露时，流式 `out` 自动作为 `text/event-stream` Response 直通；
+- 需对流做加工（协议适配、事件重排）时，用原语 `sseEvents(stream)` / `parseSseJson(data)`。
+
+### manifest 与版本治理
+
+manifest 是**框架级卡片契约**（配置文件，部署唯一事实）；schema 是**类型唯一事实**。两者在注册期交叉校验防漂移。
+
+```json
 {
   "name": "product.detail",
   "version": "1.0.0",
   "entry": "./index.js",
-  // 商品卡片 requires.sources = 引用的源站卡片名(源站卡片的则是物理 ref)
   "requires": { "sources": ["jd.item-detail"], "injections": ["tenantId"] },
   "suggests": { "timeoutMs": 3000, "retry": { "max": 2, "backoff": "expo" }, "strategy": "firstSuccess" }
 }
 ```
 
-manifest 只放 schema 表达不了的四类信息(identity / entry / requires / suggests)。schema 是类型唯一事实,manifest 是部署唯一事实,注册期交叉校验防漂移。
+- `manifest` 可省略（由代码合成）；提供时校验 `name` / `version` / `requires.sources` / `requires.injections` 与代码一致。
+- Node 便捷入口：`await controller.registerCardFromManifest('./cards/sku-detail/card.json')`（`entry` 动态 import，default 导出须为卡片）。
 
-### 4. 控制面组装
+> ⚠️ **`requires.sources` 两侧同名不同义**：**商品卡片**里列出的是「引用的**源站卡片名**」（如 `jd.item-detail`）；**源站卡片**自己列出的是「物理绑定 **ref**」（如 `jd/items/detail`，它直接依赖绑定）。用于部署编排工具时需注意区分。
+
+**版本门禁**（框架不留版本史，历史是宿主制品层的责任）：
+
+- 同名同版本 → 拒绝（`version:duplicate`）；
+- 低于当前服务版本 → 默认拒绝（防误发旧版）；显式声明回滚意图 `registerCard(card, manifest, { rollback: true })` 方可重发旧版制品，**原子替换** current（无下线窗口）；
+- `deregisterCard(name)` = **退役**（退出服务目录，`handle` 即 `CARD.NOT_FOUND`；in-flight 请求持旧引用跑完，不断服）。退役 ≠ 回滚。
+
+服务目录为 `name → current`（每名字仅一份），服务面每次 `handle` **实时解析** → 原子切换。
+
+### 框架钩子与接缝中间件
+
+两者都是洋葱模型，但**主权不同**：
+
+- **框架钩子（`ControllerHooks`）**：框架特权（审计/注入/屏蔽）的执行点，**卡片不可覆盖**，置于接缝最外层。
+  - `onBusReq`：`glue` 校验通过后、per-source 段之前，可读写 `ctx.bus.req`；
+  - `onBusRes`：源站响应写入 `res.<id>` 之后，可读写 `ctx.bus.res`。
+- **接缝中间件（`middlewares`）**：卡片自带的洋葱层，声明作用于哪个接缝（`toGlue` / `bind` / `take` / `put` / `fromGlue`）。
 
 ```ts
-import { RelayController } from 'omni-relay';
-
 const controller = new RelayController({
-  // 框架特权钩子:审计/注入/屏蔽的执行点(卡片不可覆盖)
   hooks: {
-    onBusReq: (ctx) => { /* ctx.bus.req 已就绪:可审计/屏蔽 */ },
-    onBusRes: (ctx) => { /* ctx.bus.res 已就绪 */ },
+    onBusReq: (ctx) => { (ctx.bus.req as any).internalTag = '***'; },  // 屏蔽
+    onBusRes: (ctx) => { audit.write(ctx.bus.digest()); },              // 审计
   },
 });
 
-// 物理绑定(环境配置)
-controller.registerSource('jd/items/detail', {
-  baseURL: 'https://jd.example.com',
-  auth: () => secrets.jd,     // 惰性取用,永不进总线
-  timeoutMs: 5000,
-});
-// 源站卡片向中心化注册表注册自己(商品卡片引用的前置条件)
-controller.registerSourceCard(jdItemDetail);
-controller.registerCard(skuDetail /* , manifest 对象可选 */);
-controller.setRuntimeConfig('product.detail', { tenantId: 'T-01' }); // 注册期静态注入
-controller.setPolicy('product.detail', { timeoutMs: 2000 });         // 覆盖 suggests
-```
-
-### 5. 服务面调用
-
-```ts
-const relay = controller.buildRelay(); // 上线门:inject 可满足才放行
-
-// 程序化(商品 API 主形态)
-const out = await relay.handle('product.detail', { sku: 'A1' });
-
-// 或暴露为框架无关 fetch handler(网关/直通)
-export default relay.toFetchHandler({
-  route: (req) => new URL(req.url).pathname.split('/')[1],
+// 卡片中间件：next() 前改写、next() 后读取本接缝产物
+defineCard({
+  // ...
+  middlewares: [{
+    seam: 'take',
+    run: async (ctx, next) => {
+      await next();                                  // take 产物就绪、transport 未执行
+      ctx.upstream = { ...ctx.upstream!, headers: { 'x-trace': ctx.meta.traceId as string } };
+    },
+  }],
 });
 ```
 
-## 核心机制
+`GlueCtx` 贯穿一次执行，含 `card` / `bus` / `state` / `log` / `signal` / `timing` / `meta`，以及 per-source 段隔离的 `sourceId` / `sourceInput` / `upstream` / `raw`。
 
-### 七个校验点(默认全开,`handle` 的 `strict: false` 可降级)
-
-| 位置 | 错误码 | 状态 |
-|------|--------|------|
-| 商品入参 | `GLUE.SCHEMA.IN` | 400 |
-| toGlue 产物 vs `glue` | `GLUE.SCHEMA.GLUE` | 502 |
-| bind 产物 vs 源站卡片 `input` | `GLUE.SCHEMA.INPUT` | 502 |
-| take 产物 vs 源站卡片 `request`(可选,子集校验不重建) | `GLUE.SCHEMA.REQUEST` | 502 |
-| 源站原始响应 vs 源站卡片 `upstreamRes` | `GLUE.SCHEMA.UPSTREAM_RES` | 502 |
-| put 产物 vs 源站卡片 `output` | `GLUE.SCHEMA.OUTPUT` | 502 |
-| fromGlue 产物 vs `out` | `GLUE.SCHEMA.OUT` | 502 |
-
-### 错误模型(三层,raw 永不透出)
-
-```
-UpstreamError(原始) → GlueError(规范化: code / retryable / status / seam / sourceId) → 商品侧
-```
-
-- 传输层:`GLUE.TRANSPORT.TIMEOUT`(504)/ `NETWORK`(502)/ `CANCELLED`(499);
-- 业务层:经 `errorMap` 翻译为 `GLUE.BUSINESS.<映射码>`(2xx 响应携带错误码同样命中);
-- **`retryable` 是重试与多源站切换的唯一信号**;`raw` 只进日志,不进响应。
-
-### 字段两分区与权限模型
-
-| 分区 | 声明 | 类型 | 框架可做 |
-|------|------|------|----------|
-| core | 卡片转换函数保证 | 必选 | 审计、redact 脱敏;**不可 deny** |
-| extension(`inject()`) | 控制面运行时配置(注册期校验可满足) | 必选(源站卡片与 take 可信任存在) | 审计、注入、deny |
-
-审计/屏蔽/注入是框架主权(卡片不可覆盖);超时/重试/策略是卡片建议(框架可覆盖)。
-源站卡片不支持注入字段(运行时差异由业务卡片 `glue` 经 `bind` 传入)。
-
-### 多源站策略
+### 暴露为 fetch handler
 
 ```ts
-controller.setPolicy('product.detail', { strategy: 'firstSuccess' });
+const handler = relay.toFetchHandler();     // 缺省路由：pathname 首段 decodeURIComponent = 卡片名
+// 或自定义路由：relay.toFetchHandler({ route: (req) => parseCardName(req) })
+
+const res = await handler(new Request('https://x/product.detail', {
+  method: 'POST',
+  body: JSON.stringify({ sku: 'A1' }),
+}));
 ```
 
-- `firstSuccess`(默认):顺序执行,仅 `retryable` 错误切换下一个源站,业务性失败直接抛出;
-- `race`:并发,首个成功者胜出;
-- `all`:全部执行,`fromGlue` 显式聚合各 `res.<id>` 命名空间。
+- `GET` / `HEAD`：query 参数作为入参；其它方法：JSON body 作为入参；
+- 成功 → `application/json`（`out`）；流式 `out` → `text/event-stream` 直通；
+- 失败 → `{ error: { code, sourceId? } }`，**不透出** `raw` 与内部 message 细节。
 
-多卡片可引用同一张源站卡片,各自独立执行、`res.<id>` 写隔离互不污染。
+适配任意 fetch 兼容运行时（Node、Edge、Workers、网关）。
 
-### 流式透传(声明制)
+### 测试
 
-源站返回 `text/event-stream` 时,响应体以 `ReadableStream<Uint8Array>` 直通,不整包缓冲:
+`omni-relay/testing` 子入口提供 mock 传输，无需真实网络：
 
 ```ts
-const llmStream = defineSource({
-  meta: { name: 'openai.chat', version: '1.0.0' },
-  ref: 'openai/chat',
-  stream: true,                                        // 声明:响应旁路校验,put 可省略
-  input: z.object({ prompt: z.string() }),
-  upstreamRes: z.custom<ReadableStream<Uint8Array>>(), // 仅类型留档
-  output: z.custom<ReadableStream<Uint8Array>>(),
-  take: ({ prompt }) => ({ method: 'POST', path: '/v1/chat/completions',
-                           body: { prompt, stream: true } }),
-});
+import { mockSource, lastBody } from 'omni-relay/testing';
 
-const llmChat = defineCard({
-  meta: { name: 'llm.chat', version: '1.0.0' },
-  in:  z.object({ prompt: z.string() }),
-  out: z.custom<ReadableStream<Uint8Array>>(),          // 出参 = 流
-  glue: z.object({ prompt: z.string() }),
-  toGlue: ({ prompt }) => ({ prompt }),
-  sources: [{ source: llmStream, id: 'up', bind: (g) => ({ prompt: g.prompt }) }],
-  fromGlue: (_g, res) => res.up,                        // out = 流,直通给商品侧
-});
+// 回放规则：单值 / 序列（超出取最后一个，便于测重试耗尽）/ 函数（按调用次数）
+const src = mockSource('jd/items/detail', { body: { item_name: 'X', price: 9.9, stock: 3 } });
+
+controller.registerSource(src.ref, src.binding);   // binding 内置 mock fetch
+// ... registerSourceCard / registerCard / setRuntimeConfig / buildRelay / handle
+
+src.mock.calls[0].url;    // 断言 take 产物（URL）
+lastBody(src.mock);       // 断言请求体
 ```
 
-- **声明制旁路**:校验链对流不可执行(物理约束),以 `stream: true` 显式授予;未声明的源站收到流式响应 → `GLUE.BUSINESS.UPSTREAM_STREAM_UNDECLARED`,拒绝静默降级;
-- **错误边界**:流建立前的错误(HTTP 状态 / 传输层 / errorMap)完全走现有 GlueError 规范化;流建立后的中断(响应头已发出)无法再收敛为错误响应,由宿主按流中断处理;
-- **超时语义**:`timeoutMs` 只覆盖到流建立,不掐长流;外部 `signal`(客户端断开)传播终止上游流;管线失败路径会 cancel 已建立未消费的流(防连接悬挂);
-- **策略边界**:多源站切换建议 `firstSuccess`(切换发生在流建立前);`race`/`all` 与流式组合存在败者流悬挂,不建议使用;
-- **直通形态**:`relay.toFetchHandler` 对流式出参返回 SSE Response(`text/event-stream` / `no-cache` / `keep-alive`);程序化 `handle` 场景由宿主自行组装 Response。
+流式回放用 `{ sse: 'data: hi\n\ndata: [DONE]\n\n' }`（或现成 `ReadableStream`）。
 
-### 测试投影
+---
 
-```ts
-import { mockSource } from 'omni-relay/testing';
+## 校验点与错误码
 
-const src = mockSource('jd/items/detail', (_req, i) =>
-  i < 2 ? { status: 500, body: { error: { code: 'RATE_LIMITED' } } } : { body: GOOD });
-controller.registerSource(src.ref, src.binding);
-controller.registerSourceCard(jdItemDetail);
-// src.mock.calls 记录每次请求;序列回放/函数回放均可;流式回放:{ sse: 'data: ...\n\n' }
+管道上有 7 个 Zod 校验点（`strict: false` 可整体跳过），失败即收敛为 `GlueError`：
+
+| 校验点 | 归属接缝 | 校验对象 | 错误码 | HTTP |
+| --- | --- | --- | --- | --- |
+| `in` | toGlue | 商品入参 vs `card.in` | `GLUE.SCHEMA.IN` | 400 |
+| `glue` | toGlue | 总线 `req` vs `card.glue` | `GLUE.SCHEMA.GLUE` | 502 |
+| `input` | bind | 源站入参 vs `source.input` | `GLUE.SCHEMA.INPUT` | 502 |
+| `request` | take | 源站请求 vs `source.request`（可选） | `GLUE.SCHEMA.REQUEST` | 502 |
+| `upstreamRes` | put | 源站原始响应 vs `source.upstreamRes` | `GLUE.SCHEMA.UPSTREAM_RES` | 502 |
+| `output` | put | 原子字段 vs `source.output` | `GLUE.SCHEMA.OUTPUT` | 502 |
+| `out` | fromGlue | 商品出参 vs `card.out` | `GLUE.SCHEMA.OUT` | 502 |
+
+统一错误模型 `GlueError`：任何一跳失败都收敛为它。字段 `code` / `message` / `retryable` / `status` / `seam` / `sourceId?` / `raw?`。
+
+| 错误码族 | HTTP | retryable | 含义 |
+| --- | --- | --- | --- |
+| `GLUE.SCHEMA.*` | 400 / 502 | 否 | 校验点失败（见上表） |
+| `GLUE.TRANSPORT.TIMEOUT` | 504 | **是** | 源站请求超时 |
+| `GLUE.TRANSPORT.NETWORK` | 502 | **是** | 源站网络错误 |
+| `GLUE.TRANSPORT.CANCELLED` | 499 | 否 | 请求被取消 |
+| `GLUE.BUSINESS.<CODE>` | 502 | 视 `retryableCodes` | 源站业务错误（`errorMap` 翻译后），含 `SOURCE_UNBOUND` / `UPSTREAM_STREAM_UNDECLARED` |
+| `GLUE.CARD.NOT_FOUND` | 404 | 否 | 未注册的卡片 |
+| `GLUE.UNKNOWN` | 500 | 否 | 未收敛的异常 |
+
+- `retryable` 是**重试 / 切换源站的唯一信号**；
+- `raw`（源站原始响应体）**只进日志/审计，永不透出**给商品侧（`toJSON()` 只含 `code` / `status` / `sourceId`）；
+- 声明期 / 注册期错误为 `RegistrationError`（带 `step` 定位）。
+
+---
+
+## API 参考
+
+主入口 `omni-relay`：
+
+| 分类 | 导出 |
+| --- | --- |
+| 定义卡片 | `defineCard`、`defineSource`、`inject`、`redact` |
+| 控制面 | `RelayController`、`noopLogger` |
+| 服务面 | `Relay` |
+| manifest | `ManifestSchema`、`parseManifest`、`readManifest` |
+| 总线 / 标记 | `Bus`、`relayMeta`、`scanGlueMeta` |
+| 源站 / 传输 | `SourceRegistry`、`defaultTransport`、`buildUrl`、`buildInit`、`MockSource` |
+| 流式 | `isReadableStream`、`sseEvents`、`parseSseJson` |
+| 错误 | `GlueError`、`RegistrationError` |
+| 类型 | `RelayCard`、`SourceCard`、`SourceCardRef`、`GlueCtx`、`UpstreamRequest`、`SourceBinding`、`ResolvedPolicy`、`InspectView`、`Manifest`、`CheckSeam`、`SseEvent` 等 |
+
+测试子入口 `omni-relay/testing`：`mockSource`、`lastBody`、`MockSource`，及类型 `MockedSource`、`MockResponse`、`MockResponder`。
+
+`RelayController` 主要方法：
+
+| 方法 | 说明 |
+| --- | --- |
+| `registerSource(ref, binding)` | 逻辑 ref → 物理绑定（`baseURL` / `headers` / `auth` / `timeoutMs` / `fetch`） |
+| `registerSourceCard(sc, manifest?, opts?)` | 注册源站卡片到中心化注册表 |
+| `registerCard(card, manifest?, opts?)` | 注册商品卡片（执行交叉校验链 + 版本门禁） |
+| `registerCardFromManifest(path, loader?)` | Node 便捷入口：从 manifest 文件注册 |
+| `setRuntimeConfig(name, config)` | 注入 `inject` 字段值 |
+| `setPolicy(name, policy)` | 性能类策略覆盖（`timeoutMs` / `retry` / `strategy`） |
+| `buildRelay()` | 上线门：注入字段齐备后产出 `Relay` |
+| `deregisterCard(name)` / `deregisterSourceCard(name)` | 退役 |
+| `inspectCard(name)` / `inspectSourceCard(name)` | 字段级只读视图（管理界面 / 审计工具消费） |
+| `listCards()` / `listSourceCards()` / `listBindings()` | 清单视图（`listBindings` 不含认证材料，仅 `hasAuth` 布尔） |
+| `getAuditLog()` | 控制面操作审计（谁在何时注册 / 变更了什么） |
+
+---
+
+## 设计原则
+
+- **卡片是一等公民**：每个能力（源站对接 / 商品 API）都是可独立声明、注册、版本化、退役的卡片。
+- **声明期自洽**：`defineCard` / `defineSource` 就地校验，「对不上」在声明期报错，不留到运行时。
+- **契约双事实源交叉校验**：schema 是类型唯一事实，manifest 是部署唯一事实，注册期交叉校验防漂移。
+- **总线是介入面**：框架主权（审计 / 注入 / 屏蔽）住在总线与钩子上，卡片不可覆盖 —— 治理与业务解耦。
+- **控制面 / 服务面分离**：控制面治理、服务面执行，原子切换不断服，in-flight 请求持旧引用跑完。
+- **对接与消费解耦**：源站卡片不知道谁消费，商品卡片不接触源站细节，经中心化注册表按名引用。
+- **错误收敛**：任何一跳失败收敛为 `GlueError`，`retryable` 是重试/切换唯一信号，`raw` 永不外泄。
+
+---
+
+## 项目结构
+
+```
+src/
+├─ index.ts            公共出口
+├─ core/
+│  ├─ types.ts         全部类型契约
+│  ├─ card.ts          defineCard（商品卡片声明期校验）
+│  ├─ sourceCard.ts    defineSource（源站卡片声明期校验）
+│  ├─ markers.ts       inject / redact 字段标记
+│  ├─ bus.ts           中介总线（三分区 + 脱敏摘要）
+│  ├─ pipeline.ts      管道执行序（per-source 段、重试、错误映射）
+│  ├─ strategy.ts      多源站策略（firstSuccess / race / all）
+│  ├─ controller.ts    控制面（注册 / 绑定 / 注入 / 策略 / 审计 / 版本门禁）
+│  ├─ relay.ts         服务面（handle / toFetchHandler）
+│  ├─ manifest.ts      manifest schema 与读取
+│  ├─ errors.ts        GlueError / RegistrationError 与错误码
+│  ├─ validate.ts      校验点执行器
+│  └─ stream.ts        isReadableStream
+├─ source/
+│  ├─ registry.ts      源站注册表（ref → 物理绑定）
+│  ├─ transport.ts     defaultTransport / buildUrl / buildInit / MockSource
+│  └─ sse.ts           sseEvents / parseSseJson 流原语
+└─ testing/
+   └─ index.ts         测试子入口（mockSource / lastBody）
 ```
 
-卡片是代码里最小完备单元——mock 源站 + fixture 即可全链路测试,无需起任何服务。
-
-## 设计决策记录
-
-1. 双层卡片:源站卡片(对接者定义能力契约 `input`/`output`,向中心化注册表注册)与商品卡片(业务者引用 + `bind` 参数映射 + `fromGlue` 计算派生);
-2. 商品卡片 5 件套 + 强制 manifest(框架级契约);
-3. 总线三分区 `req` / `res.<srcId>` / `out`(错误挂 `err`),写隔离由内核强制;
-4. 请求/响应对称(`toGlue`↔`fromGlue`、`bind`+`take`↔`put`),框架钩子成对出现,操作权对等;
-5. 注入 = 注册期静态(请求期动态数据一律由 toGlue 写入);
-6. 物理绑定 `ref` + 控制面专用接口注入,源站卡片可移植、密钥不进代码;
-7. 服务目录与源站注册表均版本化 + 原子切换(in-flight 请求由旧版本跑完);
-8. 控制面全部操作进入审计日志(不记录认证材料);
-9. 中间件按接缝声明(`toGlue` / `bind` / `take` / `put` / `fromGlue`),洋葱模型,next 后产物就绪;
-10. 流式透传是声明制的校验旁路:`stream: true` 显式授予,未声明收到流式响应直接拒绝;流建立前错误全程 GlueError 规范化。
-11. 回滚语义:框架只留 current,不留存版本史(历史是卡片开发者/宿主制品层的责任);注册链以版本比较做门禁——同名同版本拒绝,低于 current 默认拒绝(防误发旧版),显式回滚意图(`opts.rollback`)方可重发旧版制品,原子替换无下线窗口;`deregisterCard`/`deregisterSourceCard` = 退役(移除 current 退出服务目录,退役后重注册同版本不受限)。契约类变更只切换控制面状态:业务卡片内嵌源站卡片对象,服务面须下游重新注册方生效——控制面只治理,不代跑部署;绑定类变更(`registerSource` 覆盖)则活生效。
-
-## Roadmap(第一版未含)
-
-- cache / breaker / otel 内置中间件(接缝机制即预留点);
-- 分页归一、流式归一(chunk 级 schema 校验/转换;当前流式为整流透传);
-- 卡片编排、源站 webhook 反向绑定。
+---
 
 ## 开发
 
 ```bash
-npm test            # vitest 全量
-npm run test:coverage
-npm run typecheck
-npm run build       # tsdown → esm + cjs + dts
+pnpm install
+pnpm build       # tsdown → dist（ESM + CJS + 类型声明 + sourcemap）
+pnpm test        # vitest run
+pnpm test:watch  # vitest 监听模式
+pnpm test:coverage
+pnpm typecheck   # tsc --noEmit
 ```
 
-MIT
+---
+
+## License
+
+MIT（见 [`package.json`](./package.json) 的 `license` 字段）。
