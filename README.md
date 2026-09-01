@@ -255,7 +255,7 @@ controller.registerSourceCard(jdItemDetail);
 8. 控制面全部操作进入审计日志(不记录认证材料);
 9. 中间件按接缝声明(`toGlue` / `bind` / `take` / `put` / `fromGlue`),洋葱模型,next 后产物就绪;
 10. 流式透传是声明制的校验旁路:`stream: true` 显式授予,未声明收到流式响应直接拒绝;流建立前错误全程 GlueError 规范化。
-11. 版本史留存与回滚语义:版本史留存各版本实体,移除即回滚(`deregisterCard`/`deregisterSourceCard`,移除 current 时回落至注册序最近的在册版本,全部移除退出服务目录),被移除版本可再次注册重新上架。契约类回滚只切换控制面状态:业务卡片内嵌源站卡片对象,服务面须下游重新注册方生效——控制面只治理,不代跑部署;绑定类变更(`registerSource` 覆盖)则活生效。
+11. 回滚语义:框架只留 current,不留存版本史(历史是卡片开发者/宿主制品层的责任);注册链以版本比较做门禁——同名同版本拒绝,低于 current 默认拒绝(防误发旧版),显式回滚意图(`opts.rollback`)方可重发旧版制品,原子替换无下线窗口;`deregisterCard`/`deregisterSourceCard` = 退役(移除 current 退出服务目录,退役后重注册同版本不受限)。契约类变更只切换控制面状态:业务卡片内嵌源站卡片对象,服务面须下游重新注册方生效——控制面只治理,不代跑部署;绑定类变更(`registerSource` 覆盖)则活生效。
 
 ## Roadmap(第一版未含)
 

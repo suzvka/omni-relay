@@ -211,11 +211,18 @@ describe('RelayController 视图与审计', () => {
   });
 });
 
-describe('RelayController 版本史与回滚', () => {
+describe('RelayController 退役与回滚（只留 current；版本史归制品层）', () => {
   /** 同一业务卡片的指定版本变体(仅 meta 差异) */
   function cardAtVersion(version: string): ReturnType<typeof makeCard> {
     const base = makeCard();
     const meta = { name: 'product.detail', version };
+    return { ...base, def: { ...base.def, meta }, meta };
+  }
+
+  /** 同源站卡片的指定版本变体(仅 meta 差异) */
+  function sourceAtVersion(version: string): ReturnType<typeof makeSourceCard> {
+    const base = makeSourceCard();
+    const meta = { name: base.meta.name, version };
     return { ...base, def: { ...base.def, meta }, meta };
   }
 
@@ -226,80 +233,91 @@ describe('RelayController 版本史与回滚', () => {
     return c;
   }
 
-  it('注册新版原子替换;移除 current → 回落至注册序最近的在册版本', () => {
+  it('注册新版本 → 原子替换 current', () => {
     const c = readyController();
     c.registerCard(cardAtVersion('1.0.0')).registerCard(cardAtVersion('1.1.0'));
     expect(c.listCards().map((s) => s.version)).toEqual(['1.1.0']);
-
-    c.deregisterCard('product.detail', '1.1.0');
-    expect(c.listCards().map((s) => s.version)).toEqual(['1.0.0']);
-    expect(c.listCardVersions('product.detail')).toEqual([
-      { version: '1.0.0', current: true },
-    ]);
   });
 
-  it('全部移除 → 退出服务目录;服务面 handle 即 CARD.NOT_FOUND', async () => {
+  it('误发旧版 → 拒绝(version:downgrade);声明 rollback 重发旧版 → 替换', () => {
+    const c = readyController();
+    c.registerCard(cardAtVersion('1.0.0')).registerCard(cardAtVersion('1.1.0'));
+    try {
+      c.registerCard(cardAtVersion('1.0.0'));
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(RegistrationError);
+      expect((e as RegistrationError).step).toBe('version:downgrade');
+    }
+    c.registerCard(cardAtVersion('1.0.0'), undefined, { rollback: true });
+    expect(c.listCards().map((s) => s.version)).toEqual(['1.0.0']);
+  });
+
+  it('回滚重发原子切换:服务面无下线窗口(期间 handle 恒可解析)', async () => {
     const c = readyController();
     c.registerCard(cardAtVersion('1.0.0')).registerCard(cardAtVersion('1.1.0'));
     const relay = c.buildRelay();
     await expect(relay.handle('product.detail', { sku: 'A1' })).resolves.toBeTruthy();
-
-    c.deregisterCard('product.detail', '1.1.0');
-    await expect(relay.handle('product.detail', { sku: 'A1' })).resolves.toBeTruthy(); // 回落 1.0.0
-    c.deregisterCard('product.detail', '1.0.0');
-    await expect(relay.handle('product.detail', { sku: 'A1' })).rejects.toThrowError(GlueError);
-    expect(c.listCards()).toEqual([]);
+    c.registerCard(cardAtVersion('1.0.0'), undefined, { rollback: true });
+    await expect(relay.handle('product.detail', { sku: 'A1' })).resolves.toBeTruthy();
   });
 
-  it('移除非 current 版本 → current 不变', () => {
-    const c = readyController();
-    c.registerCard(cardAtVersion('1.0.0')).registerCard(cardAtVersion('1.1.0'));
-    c.deregisterCard('product.detail', '1.0.0');
-    expect(c.listCards().map((s) => s.version)).toEqual(['1.1.0']);
-    expect(c.listCardVersions('product.detail')).toEqual([
-      { version: '1.1.0', current: true },
-    ]);
-  });
-
-  it('被移除版本可再次注册(重新上架;版本标记随移除清除)', () => {
+  it('退役:移除 current → handle 即 CARD.NOT_FOUND;退役后重注册同版本不受限', async () => {
     const c = readyController();
     c.registerCard(cardAtVersion('1.0.0'));
-    c.deregisterCard('product.detail', '1.0.0');
+    const relay = c.buildRelay();
+    await expect(relay.handle('product.detail', { sku: 'A1' })).resolves.toBeTruthy();
+
+    c.deregisterCard('product.detail');
+    await expect(relay.handle('product.detail', { sku: 'A1' })).rejects.toThrowError(GlueError);
+    expect(c.listCards()).toEqual([]);
+
+    // 退役 ≠ 版本黑名单:同版本制品重新上架放行
     expect(() => c.registerCard(cardAtVersion('1.0.0'))).not.toThrow();
     expect(c.listCards().map((s) => s.version)).toEqual(['1.0.0']);
   });
 
-  it('移除未注册版本 → RegistrationError(version:unknown)', () => {
-    const c = readyController();
+  it('退役未注册卡片 → RegistrationError(card:unknown)', () => {
     try {
-      c.deregisterCard('product.detail', '9.9.9');
+      readyController().deregisterCard('nope');
       expect.unreachable();
     } catch (e) {
       expect(e).toBeInstanceOf(RegistrationError);
-      expect((e as RegistrationError).step).toBe('version:unknown');
+      expect((e as RegistrationError).step).toBe('card:unknown');
     }
   });
 
-  it('源站卡片移除后:新业务卡片注册被拒(③);已注册业务卡片照常运行(内嵌对象)', async () => {
+  it('源站卡片 ③ 校验精确匹配 current 版本:旧版回滚重发后引用方方可注册', () => {
+    const c = boundController();
+    c.registerSourceCard(sourceAtVersion('1.1.0'));
+    // 业务卡片内嵌 1.0.0(标准夹具),与 current 1.1.0 不符 → ③ 拒绝
+    expect(() => c.registerCard(makeCard())).toThrowError(/源站卡片未注册/);
+    // 旧版回滚重发 → current 切为 1.0.0 → 引用方通过
+    c.registerSourceCard(sourceAtVersion('1.0.0'), undefined, { rollback: true });
+    expect(() => c.registerCard(makeCard())).not.toThrow();
+  });
+
+  it('源站卡片退役后:新业务卡片注册被拒(③);已注册业务卡片照常运行(内嵌对象)', async () => {
     const c = readyController();
     c.registerCard(cardAtVersion('1.0.0'));
     const relay = c.buildRelay();
 
-    c.deregisterSourceCard('jd.item-detail', '1.0.0');
+    c.deregisterSourceCard('jd.item-detail');
     expect(() => c.registerCard(cardAtVersion('1.1.0'))).toThrowError(/源站卡片未注册/);
     // 运行时取业务卡片内嵌的源站卡片对象,控制面退役不代跑部署
     await expect(relay.handle('product.detail', { sku: 'A1' })).resolves.toBeTruthy();
   });
 
-  it('deregister 进入审计;源站卡片版本时间线同构', () => {
+  it('deregister 进入审计(target 含 name@version)', () => {
     const c = readyController();
     c.registerCard(cardAtVersion('1.0.0'));
-    c.deregisterCard('product.detail', '1.0.0');
-    c.deregisterSourceCard('jd.item-detail', '1.0.0');
-    const actions = c.getAuditLog().map((a) => a.action);
-    expect(actions).toContain('deregisterCard');
-    expect(actions).toContain('deregisterSourceCard');
-    expect(() => c.listSourceCardVersions('jd.item-detail')).toThrowError(GlueError);
+    c.deregisterCard('product.detail');
+    c.deregisterSourceCard('jd.item-detail');
+    const log = c.getAuditLog();
+    expect(log.map((a) => a.action)).toContain('deregisterCard');
+    expect(log.map((a) => a.action)).toContain('deregisterSourceCard');
+    expect(log.find((a) => a.action === 'deregisterCard')?.target).toBe('product.detail@1.0.0');
+    expect(log.find((a) => a.action === 'deregisterSourceCard')?.target).toBe('jd.item-detail@1.0.0');
   });
 
   it('listBindings 给出绑定摘要且不含认证材料', () => {

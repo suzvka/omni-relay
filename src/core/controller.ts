@@ -13,6 +13,7 @@ import type {
   InspectView,
   Logger,
   PolicyInput,
+  RegisterOptions,
   RelayCard,
   RelayControllerOptions,
   ResolvedPolicy,
@@ -171,9 +172,9 @@ export class RelayController {
   /**
    * 注册源站卡片。校验链:
    * ① manifest 合法性 → ② manifest↔代码一致性(requires.sources 即其物理 ref,源站卡片不支持注入)
-   * → ③ 物理绑定就绪 → 版本化(同名同版本拒绝,新版本原子替换)。
+   * → ③ 物理绑定就绪 → 版本门禁(同业务卡片:同版本拒绝/旧版需显式回滚意图)。
    */
-  registerSourceCard(sc: SourceCard, manifest?: ManifestInput): this {
+  registerSourceCard(sc: SourceCard, manifest?: ManifestInput, opts?: RegisterOptions): this {
     const parsed = manifest ? parseManifest(manifest) : synthesizeSourceManifest(sc);
 
     // ② manifest ↔ 代码一致性
@@ -201,18 +202,25 @@ export class RelayController {
       throw new RegistrationError(`源站未注册: ${sc.def.ref}`, 'source:resolved');
     }
 
-    // 版本化:同名同版本拒绝(在册时),新版本原子替换 current,旧版实体留存版本史
-    const history = this.#sourceCardHistory.get(parsed.name) ?? new Map<string, SourceCardEntry>();
-    if (history.has(parsed.version)) {
-      throw new RegistrationError(
-        `源站卡片 ${parsed.name}@${parsed.version} 已注册`,
-        'version:duplicate',
-      );
+    // 版本门禁:语义与业务卡片同构(同版本拒绝;旧版需显式回滚意图,原子替换)
+    const current = this.#sourceCards.get(parsed.name);
+    if (current) {
+      const cmp = compareSemver(parsed.version, current.manifest.version);
+      if (cmp === 0) {
+        throw new RegistrationError(
+          `源站卡片 ${parsed.name}@${parsed.version} 已注册`,
+          'version:duplicate',
+        );
+      }
+      if (cmp < 0 && !opts?.rollback) {
+        throw new RegistrationError(
+          `源站卡片 ${parsed.name}@${parsed.version} 低于当前服务版本 ${current.manifest.version}(回滚重发请声明 opts.rollback)`,
+          'version:downgrade',
+        );
+      }
     }
 
     const entry: SourceCardEntry = { sourceCard: sc, manifest: parsed };
-    history.set(parsed.version, entry);
-    this.#sourceCardHistory.set(parsed.name, history);
     this.#sourceCards.set(parsed.name, entry);
     this.#record('registerSourceCard', `${parsed.name}@${parsed.version}`);
     return this;
@@ -230,63 +238,35 @@ export class RelayController {
   }
 
   // -------------------------------------------------------------------------
-  // 退役与回滚(版本史留存;移除=回滚,被移除版本可再次注册重新上架)
+  // 退役(框架不留版本史:回滚=重发旧版制品,见注册链版本门禁)
   // -------------------------------------------------------------------------
 
   /**
-   * 移除业务卡片的某个版本(同步清版本标记)。
-   * 移除 current → current 回落至注册序最近的在册版本;全部移除 → 退出服务目录
-   * (handle 即 CARD.NOT_FOUND)。in-flight 请求持旧引用跑完,不断服。
-   * 注意:已注册的商品卡片内嵌的源站卡片对象不受影响(运行时取内嵌副本),
-   * 契约类回滚须下游重新注册方在服务面生效——控制面只治理,不代跑部署。
+   * 退役业务卡片:移除当前服务版本,退出服务目录(handle 即 CARD.NOT_FOUND)。
+   * in-flight 请求持旧引用跑完,不断服。退役 ≠ 回滚:回滚 = 重发旧版制品
+   * (注册时声明 {@link RegisterOptions.rollback});退役后重新注册同版本制品不受限。
+   * 注意:已注册的商品卡片内嵌的源站卡片对象不受源站卡片退役影响(运行时取内嵌副本),
+   * 契约类变更须下游重新注册方在服务面生效——控制面只治理,不代跑部署。
    */
-  deregisterCard(name: string, version: string): this {
-    const history = this.#cardHistory.get(name);
-    if (!history?.has(version)) {
-      throw new RegistrationError(`卡片 ${name}@${version} 未注册`, 'version:unknown');
+  deregisterCard(name: string): this {
+    const current = this.#cards.get(name);
+    if (!current) {
+      throw new RegistrationError(`卡片 ${name} 未注册`, 'card:unknown');
     }
-    history.delete(version);
-    if (history.size === 0) {
-      this.#cardHistory.delete(name);
-      this.#cards.delete(name);
-    } else if (this.#cards.get(name)?.manifest.version === version) {
-      this.#cards.set(name, [...history.values()][history.size - 1] as CatalogEntry);
-    }
-    this.#record('deregisterCard', `${name}@${version}`);
+    this.#cards.delete(name);
+    this.#record('deregisterCard', `${name}@${current.manifest.version}`);
     return this;
   }
 
-  /** 移除源站卡片的某个版本;语义与 {@link deregisterCard} 同构 */
-  deregisterSourceCard(name: string, version: string): this {
-    const history = this.#sourceCardHistory.get(name);
-    if (!history?.has(version)) {
-      throw new RegistrationError(`源站卡片 ${name}@${version} 未注册`, 'version:unknown');
+  /** 退役源站卡片;语义与 {@link deregisterCard} 同构 */
+  deregisterSourceCard(name: string): this {
+    const current = this.#sourceCards.get(name);
+    if (!current) {
+      throw new RegistrationError(`源站卡片 ${name} 未注册`, 'sourceCard:unknown');
     }
-    history.delete(version);
-    if (history.size === 0) {
-      this.#sourceCardHistory.delete(name);
-      this.#sourceCards.delete(name);
-    } else if (this.#sourceCards.get(name)?.manifest.version === version) {
-      this.#sourceCards.set(name, [...history.values()][history.size - 1] as SourceCardEntry);
-    }
-    this.#record('deregisterSourceCard', `${name}@${version}`);
+    this.#sourceCards.delete(name);
+    this.#record('deregisterSourceCard', `${name}@${current.manifest.version}`);
     return this;
-  }
-
-  /** 业务卡片版本时间线(注册序;标注 current;未注册过的名字 → GlueError) */
-  listCardVersions(name: string): Array<{ version: string; current: boolean }> {
-    const history = this.#cardHistory.get(name);
-    if (!history) throw GlueError.cardNotFound(name);
-    const current = this.#cards.get(name)?.manifest.version;
-    return [...history.keys()].map((version) => ({ version, current: version === current }));
-  }
-
-  /** 源站卡片版本时间线(语义与 {@link listCardVersions} 同构) */
-  listSourceCardVersions(name: string): Array<{ version: string; current: boolean }> {
-    const history = this.#sourceCardHistory.get(name);
-    if (!history) throw GlueError.cardNotFound(name);
-    const current = this.#sourceCards.get(name)?.manifest.version;
-    return [...history.keys()].map((version) => ({ version, current: version === current }));
   }
 
   /** 物理绑定只读摘要(不含认证材料:auth 只以 hasAuth 布尔呈现) */
@@ -458,6 +438,25 @@ function synthesizeSourceManifest(sc: SourceCard): Manifest {
 
 function sameSet(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n');
+}
+
+/** 简单版本比较:数字段 major.minor.patch 逐段比;同数字段时带预发布标记(-x)视为更低。
+ *  构建标记(+x)不参与比较。门禁用途,不追求完整 semver 先决规则 */
+function compareSemver(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  for (let i = 0; i < 3; i++) {
+    if (pa.nums[i] !== pb.nums[i]) return (pa.nums[i] as number) - (pb.nums[i] as number);
+  }
+  return Number(pb.pre) - Number(pa.pre);
+}
+
+function parseSemver(v: string): { nums: number[]; pre: boolean } {
+  const withoutBuild = v.split('+')[0] as string;
+  const [core, ...rest] = withoutBuild.split('-');
+  const nums = (core ?? '').split('.').map((x) => Number(x) || 0);
+  while (nums.length < 3) nums.push(0);
+  return { nums: nums.slice(0, 3), pre: rest.length > 0 };
 }
 
 async function defaultLoader(entryAbsPath: string): Promise<RelayCard> {
