@@ -1,0 +1,14 @@
+{
+  "name": "product.detail",
+  "version": "1.0.0",
+  "entry": "./index.js",
+  "requires": {
+    "sources": ["jd.item-detail"],
+    "injections": ["tenantId"]
+  },
+  "suggests": {
+    "timeoutMs": 3000,
+    "retry": { "max": 2, "backoff": "expo" },
+    "strategy": "firstSuccess"
+  }
+}
