@@ -69,17 +69,16 @@ describe('源站卡片注册(中心化注册表)', () => {
     expect(c.listSourceCards().map((s) => s.version)).toContain('1.1.0');
   });
 
-  it('业务卡片引用未注册源站卡片 → registerCard 拒绝', () => {
+  it('业务卡片 uses 未注册源站卡片 → registerCard 拒绝', () => {
     const src = mockSource('jd/items/detail', { body: GOOD_BODY });
     const c = new RelayController().registerSource(src.ref, src.binding);
     const card = defineCard({
       meta: { name: 'x.y', version: '1.0.0' },
       in: z.object({}),
       out: z.object({}),
-      glue: z.object({}),
-      toGlue: () => ({}),
-      sources: [{ source: makeSourceCard(), id: 'jd', bind: () => ({ skuId: 'A' }) }],
-      fromGlue: () => ({}),
+      uses: ['jd.item-detail'],
+      collect: async () => {},
+      respond: () => ({}),
     });
     expect(() => c.registerCard(card)).toThrow(/源站卡片未注册/);
   });
@@ -90,10 +89,7 @@ describe('运行时链路', () => {
     const branched = defineSource({
       meta: { name: 'jd.branched', version: '1.0.0' },
       ref: 'jd/items/detail',
-      input: z.object({
-        skuId: z.string(),
-        mode: z.enum(['detail', 'price']),
-      }),
+      input: z.object({ skuId: z.string(), mode: z.enum(['detail', 'price']) }),
       upstreamRes: z.object({ v: z.string() }),
       output: z.object({ v: z.string() }),
       take: ({ skuId, mode }) => ({
@@ -107,59 +103,57 @@ describe('运行时链路', () => {
       meta: { name: 'x.y', version: '1.0.0' },
       in: z.object({ sku: z.string(), mode: z.enum(['detail', 'price']) }),
       out: z.object({ v: z.string() }),
-      glue: z.object({ skuId: z.string(), mode: z.enum(['detail', 'price']) }),
-      toGlue: ({ sku, mode }) => ({ skuId: sku, mode }),
-      sources: [
-        { source: branched, id: 'b', bind: (g) => ({ skuId: g.skuId, mode: g.mode }) },
-      ],
-      fromGlue: (_g, res) => ({ v: res.b.v }),
+      uses: [branched.meta.name],
+      collect: async (ctx) => {
+        const { sku, mode } = ctx.input as { sku: string; mode: 'detail' | 'price' };
+        ctx.ir.skuId = sku; // 填 IR:源站 input 需要 skuId + mode
+        ctx.ir.mode = mode;
+        await ctx.invoke(branched.meta.name);
+      },
+      respond: (ctx) => ({ v: (ctx.ir[branched.meta.name] as { v: string }).v }),
     });
-    const { relay, sources } = setup({ card, mockBody: { v: 'ok' } });
+    const { relay, sources } = setup({ card, sourceCards: [branched], mockBody: { v: 'ok' } });
     await relay.handle('x.y', { sku: 'A1', mode: 'price' });
-    expect(sources[0].mock.calls[0].url).toContain('/v2/items/A1/price');
+    expect(sources[0]!.mock.calls[0]!.url).toContain('/v2/items/A1/price');
   });
 
-  it('bind 产物违反 input → GLUE.SCHEMA.INPUT(脏参数被拦在源站之外)', async () => {
+  it('invoke 从 IR 取入参违反 input → GLUE.SCHEMA.INPUT(脏参数被拦在源站之外)', async () => {
+    const sc = makeSourceCard();
     const broken = defineCard({
       meta: { name: 'product.detail', version: '1.0.0' },
       in: z.object({ sku: z.string() }),
       out: z.object({ name: z.string() }),
-      glue: z.object({ skuId: z.string() }),
-      toGlue: ({ sku }) => ({ skuId: sku }),
-      sources: [
-        { source: makeSourceCard(), id: 'jd', bind: (() => ({})) as never },
-      ],
-      fromGlue: (_g, res) => ({ name: res.jd.title }),
+      uses: [sc.meta.name],
+      collect: async (ctx) => {
+        await ctx.invoke(sc.meta.name); // 故意不往 IR 写 skuId → input 校验点缺字段
+      },
+      respond: (ctx) => ({ name: (ctx.ir[sc.meta.name] as { title: string }).title }),
     });
-    const src = mockSource('jd/items/detail', { body: GOOD_BODY });
-    const c = new RelayController();
-    c.registerSource(src.ref, src.binding);
-    c.registerSourceCard(makeSourceCard());
-    c.registerCard(broken);
-    const e = await c.buildRelay().handle('product.detail', { sku: 'A1' }).catch((x: unknown) => x);
+    const { relay } = setup({ card: broken, sourceCards: [sc] });
+    const e = await relay.handle('product.detail', { sku: 'A1' }).catch((x: unknown) => x);
     expect(e).toMatchObject({ code: 'GLUE.SCHEMA.INPUT' });
   });
 
-  it('多卡片引用同源站卡片:命名空间隔离互不污染', async () => {
+  it('多卡片 invoke 同源站卡片:每次 handle 独立 IR,互不污染', async () => {
     const sc = makeSourceCard();
-    const mkCard = (name: string, id: string) =>
+    const mkCard = (name: string) =>
       defineCard({
         meta: { name, version: '1.0.0' },
         in: z.object({ sku: z.string() }),
         out: z.object({ name: z.string() }),
-        glue: z.object({ skuId: z.string() }),
-        toGlue: ({ sku }) => ({ skuId: sku }),
-        sources: [{ source: sc, id, bind: (g) => ({ skuId: g.skuId }) }],
-        fromGlue: (_g, res) => ({
-          name: (res as Record<string, { title: string }>)[id].title,
-        }),
+        uses: [sc.meta.name],
+        collect: async (ctx) => {
+          ctx.ir.skuId = (ctx.input as { sku: string }).sku;
+          await ctx.invoke(sc.meta.name);
+        },
+        respond: (ctx) => ({ name: (ctx.ir[sc.meta.name] as { title: string }).title }),
       });
     const controller = new RelayController();
     const src = mockSource('jd/items/detail', { body: GOOD_BODY });
     controller.registerSource(src.ref, src.binding);
     controller.registerSourceCard(sc);
-    controller.registerCard(mkCard('card.a', 'a'));
-    controller.registerCard(mkCard('card.b', 'b'));
+    controller.registerCard(mkCard('card.a'));
+    controller.registerCard(mkCard('card.b'));
     const relay = controller.buildRelay();
     const [outA, outB] = await Promise.all([
       relay.handle('card.a', { sku: 'A1' }),

@@ -1,7 +1,7 @@
 {
   "name": "omni-relay",
-  "version": "0.1.0",
-  "description": "以商品卡片为一等公民的 API 绑定框架:将任意源站 API 包装并绑定到商品 API,中介总线是框架按字段审计/注入/屏蔽的介入面。",
+  "version": "0.2.0",
+  "description": "以卡片为一等公民的 API 绑定框架:把任意源站 API 包装为可复用的 API 卡片,业务卡片用命令式双钩子(collect/respond)在 IR 键值缓存上编排它们;IR 是框架执行宿主规则(注入/屏蔽/审计)的介入面。",
   "type": "module",
   "license": "MIT",
   "repository": {

@@ -1,14 +1,14 @@
-import { scanGlueMeta } from './markers';
 import { GlueError, RegistrationError } from './errors';
 import { parseManifest, readManifest } from './manifest';
 import type { Manifest, ManifestInput } from './manifest';
 import { Relay } from './relay';
-import type { PipelineDeps, RegisteredCard } from './pipeline';
+import type { PipelineDeps, RegisteredCard, SourceCardEntry } from './pipeline';
 import { SourceRegistry } from '../source/registry';
 import type {
-  AuditEntry,
   CardSummary,
+  ControlEvent,
   ControllerHooks,
+  InspectSource,
   InspectSourceCardView,
   InspectView,
   Logger,
@@ -18,7 +18,6 @@ import type {
   RelayControllerOptions,
   ResolvedPolicy,
   SourceCard,
-  SourceCardRef,
 } from './types';
 
 export const noopLogger: Logger = {
@@ -32,18 +31,14 @@ interface CatalogEntry extends RegisteredCard {
   manifest: Manifest;
 }
 
-interface SourceCardEntry {
-  sourceCard: SourceCard;
-  manifest: Manifest;
-}
-
 /**
- * 控制面:卡片生命周期、源站卡片注册、源站绑定、配置注入、策略覆盖、控制面操作审计。
+ * 控制面:卡片注册与卸载、源站卡片注册、源站绑定、配置注入、策略覆盖。
+ * 治理动作经 onControlEvent 通知宿主(格式/存储/转发皆宿主事),框架自身不留存。
  * 服务目录为 name → current(每名字仅一份),服务面每次 handle 实时解析 → 原子切换,
  * in-flight 请求持旧版本引用跑完。
  * 回滚语义:框架不留存版本史(历史是卡片开发者/宿主制品层的责任);注册链以版本比较
  * 做门禁——同名同版本拒绝,低于 current 默认拒绝(防误发旧版),显式声明回滚意图
- * (opts.rollback)方可重发旧版制品原子替换(无下线窗口)。`deregisterCard` = 退役。
+ * (opts.rollback)方可重发旧版制品原子替换(无下线窗口)。`deregisterCard` = 卸载。
  */
 export class RelayController {
   readonly #registry = new SourceRegistry();
@@ -52,13 +47,14 @@ export class RelayController {
   readonly #sourceCards = new Map<string, SourceCardEntry>();
   readonly #configs = new Map<string, Record<string, unknown>>();
   readonly #policies = new Map<string, PolicyInput>();
-  readonly #audit: AuditEntry[] = [];
+  readonly #onControlEvent: ((event: ControlEvent) => void) | undefined;
   readonly #hooks: ControllerHooks | undefined;
   readonly #logger: Logger;
   readonly #defaultTimeoutMs: number;
 
   constructor(opts: RelayControllerOptions = {}) {
     this.#hooks = opts.hooks;
+    this.#onControlEvent = opts.onControlEvent;
     this.#logger = opts.logger ?? noopLogger;
     this.#defaultTimeoutMs = opts.defaultTimeoutMs ?? 10_000;
   }
@@ -80,8 +76,9 @@ export class RelayController {
 
   /**
    * 注册卡片。manifest 可省略(由代码合成);提供时执行交叉校验:
-   * ① manifest 合法性 → ② manifest↔代码一致性 → ③ 引用的源站卡片已注册且物理绑定就绪 → ⑤ suggests 合法。
-   * (第 ④ 步"注入可满足"在 buildRelay 上线门统一把关,注册顺序自由)
+   * ① manifest 合法性(含 suggests 形状,由 ManifestSchema 把关) → ② manifest↔代码一致性
+   * → ③ uses 声明的源站卡片已注册且物理绑定就绪 → 版本门禁。
+   * (seeds 可满足在 buildRelay 上线门统一把关,注册顺序自由;未声明 uses 的动态 invoke 在调用期把关)
    * 版本门禁:同名同版本拒绝;低于 current 默认拒绝,显式回滚意图({@link RegisterOptions.rollback})放行。
    */
   registerCard(card: RelayCard, manifest?: ManifestInput, opts?: RegisterOptions): this {
@@ -94,32 +91,31 @@ export class RelayController {
         'manifest:identity',
       );
     }
-    if (!sameSet(parsed.requires.sources, card.sourceCardNames)) {
+    if (!sameSet(parsed.requires.sources, card.uses)) {
       throw new RegistrationError(
-        `manifest.requires.sources(${parsed.requires.sources.join(',')}) 与代码引用的源站卡片(${card.sourceCardNames.join(',')}) 不一致`,
+        `manifest.requires.sources(${parsed.requires.sources.join(',')}) 与代码 uses(${card.uses.join(',')}) 不一致`,
         'manifest:sources',
       );
     }
-    if (!sameSet(parsed.requires.injections, card.injectKeys)) {
+    if (!sameSet(parsed.requires.injections, card.seedKeys)) {
       throw new RegistrationError(
-        `manifest.requires.injections(${parsed.requires.injections.join(',')}) 与代码 inject 字段(${card.injectKeys.join(',')}) 不一致`,
+        `manifest.requires.injections(${parsed.requires.injections.join(',')}) 与代码 seeds(${card.seedKeys.join(',')}) 不一致`,
         'manifest:injections',
       );
     }
 
-    // ③ 引用的源站卡片已注册(中心化注册表,按 name@version 精确匹配当前服务版本),且其物理绑定就绪
-    for (const srcRef of card.def.sources as readonly SourceCardRef[]) {
-      const sc = srcRef.source;
-      const scCurrent = this.#sourceCards.get(sc.meta.name);
-      if (scCurrent?.manifest.version !== sc.meta.version) {
+    // ③ uses 声明的源站卡片已注册且物理绑定就绪(声明即 fail-fast;未声明的动态 invoke 在调用期把关)
+    for (const useName of card.uses) {
+      const scCurrent = this.#sourceCards.get(useName);
+      if (!scCurrent) {
         throw new RegistrationError(
-          `源站卡片未注册: ${sc.meta.name}@${sc.meta.version}(先 registerSourceCard)`,
+          `uses 声明的源站卡片未注册: ${useName}(先 registerSourceCard)`,
           'sourceCard:registered',
         );
       }
-      if (!this.#registry.has(sc.def.ref)) {
+      if (!this.#registry.has(scCurrent.sourceCard.def.ref)) {
         throw new RegistrationError(
-          `源站 ${sc.def.ref} 未绑定物理配置(源站卡片 ${sc.meta.name} 依赖)`,
+          `源站 ${scCurrent.sourceCard.def.ref} 未绑定物理配置(源站卡片 ${useName} 依赖)`,
           'source:resolved',
         );
       }
@@ -147,7 +143,7 @@ export class RelayController {
     const entry: CatalogEntry = {
       card,
       manifest: parsed,
-      ...this.#buildRuntime(card, parsed),
+      ...this.#buildRuntime(parsed),
     };
     this.#cards.set(parsed.name, entry);
     this.#record('registerCard', `${parsed.name}@${parsed.version}`);
@@ -238,15 +234,15 @@ export class RelayController {
   }
 
   // -------------------------------------------------------------------------
-  // 退役(框架不留版本史:回滚=重发旧版制品,见注册链版本门禁)
+  // 卸载(框架不留版本史:回滚=重发旧版制品,见注册链版本门禁)
   // -------------------------------------------------------------------------
 
   /**
-   * 退役业务卡片:移除当前服务版本,退出服务目录(handle 即 CARD.NOT_FOUND)。
-   * in-flight 请求持旧引用跑完,不断服。退役 ≠ 回滚:回滚 = 重发旧版制品
-   * (注册时声明 {@link RegisterOptions.rollback});退役后重新注册同版本制品不受限。
-   * 注意:已注册的商品卡片内嵌的源站卡片对象不受源站卡片退役影响(运行时取内嵌副本),
-   * 契约类变更须下游重新注册方在服务面生效——控制面只治理,不代跑部署。
+   * 卸载业务卡片:从服务目录移除当前版本(handle 即 CARD.NOT_FOUND)。
+   * in-flight 请求持旧引用跑完,不断服。卸载 ≠ 回滚:回滚 = 重发旧版制品
+   * (注册时声明 {@link RegisterOptions.rollback});卸载后重新注册同版本制品不受限。
+   * 注意:v2 下 collect 经 ctx.invoke 按名动态解析源站卡片,卸载源站卡片后 invoke 即
+   * SOURCE_NOT_REGISTERED——不再内嵌副本,依赖是运行时解析的。
    */
   deregisterCard(name: string): this {
     const current = this.#cards.get(name);
@@ -258,7 +254,7 @@ export class RelayController {
     return this;
   }
 
-  /** 退役源站卡片;语义与 {@link deregisterCard} 同构 */
+  /** 卸载源站卡片;语义与 {@link deregisterCard} 同构 */
   deregisterSourceCard(name: string): this {
     const current = this.#sourceCards.get(name);
     if (!current) {
@@ -283,23 +279,23 @@ export class RelayController {
   // 配置与策略(框架主权:覆盖卡片 suggests)
   // -------------------------------------------------------------------------
 
-  /** 注入字段值(注册期静态;请求期动态数据一律由 toGlue 写入) */
+  /** seeds 值(注册期静态,并入 IR;请求期动态数据一律由 collect 写入 IR) */
   setRuntimeConfig(cardName: string, config: Record<string, unknown>): this {
     this.#configs.set(cardName, { ...config });
     const current = this.#cards.get(cardName);
     if (current) {
-      this.#cards.set(cardName, { ...current, ...this.#buildRuntime(current.card, current.manifest) });
+      this.#cards.set(cardName, { ...current, ...this.#buildRuntime(current.manifest) });
     }
     this.#record('setRuntimeConfig', cardName, { keys: Object.keys(config) });
     return this;
   }
 
-  /** 性能类策略覆盖(审计/屏蔽等安全类策略不在此列) */
+  /** 性能类策略覆盖(治理类动作不经此通道) */
   setPolicy(cardName: string, policy: PolicyInput): this {
     this.#policies.set(cardName, { ...policy });
     const current = this.#cards.get(cardName);
     if (current) {
-      this.#cards.set(cardName, { ...current, ...this.#buildRuntime(current.card, current.manifest) });
+      this.#cards.set(cardName, { ...current, ...this.#buildRuntime(current.manifest) });
     }
     this.#record('setPolicy', cardName, policy);
     return this;
@@ -309,21 +305,32 @@ export class RelayController {
   // 服务面产出
   // -------------------------------------------------------------------------
 
-  /** 上线门:所有卡片 inject 字段可满足后才产出 Relay */
+  /** 上线门:所有卡片 seeds 存在 + 类型可满足后才产出 Relay(替代每请求的 glue 校验) */
   buildRelay(): Relay {
     for (const [name, entry] of this.#cards) {
-      const missing = entry.card.injectKeys.filter(
-        (k) => !(k in (entry.runtimeConfig ?? {})),
-      );
+      const seeds = entry.card.def.seeds ?? {};
+      const config = entry.runtimeConfig ?? {};
+      const missing = entry.card.seedKeys.filter((k) => !(k in config));
       if (missing.length > 0) {
         throw new RegistrationError(
-          `卡片 ${name} 注入字段无法满足: ${missing.join(', ')}(先 setRuntimeConfig)`,
-          'inject:satisfied',
+          `卡片 ${name} seeds 无法满足: ${missing.join(', ')}(先 setRuntimeConfig)`,
+          'seed:satisfied',
         );
+      }
+      // 类型门:seeds 值来自宿主运行时配置(无编译期类型),上线前一次性校验
+      for (const key of entry.card.seedKeys) {
+        const parsed = seeds[key]?.safeParse(config[key]);
+        if (parsed && !parsed.success) {
+          throw new RegistrationError(
+            `卡片 ${name} seed ${key} 类型不符: ${parsed.error.message}`,
+            'seed:type',
+          );
+        }
       }
     }
     const deps: PipelineDeps = {
       registry: this.#registry,
+      sourceCards: () => this.#sourceCards,
       hooks: this.#hooks,
       logger: this.#logger,
       defaultTimeoutMs: this.#defaultTimeoutMs,
@@ -339,24 +346,24 @@ export class RelayController {
   inspectCard(name: string): InspectView {
     const entry = this.#cards.get(name);
     if (!entry) throw GlueError.cardNotFound(name);
-    const { injectKeys, redactKeys } = scanGlueMeta(entry.card.def.glue);
-    const sources = (entry.card.def.sources as readonly SourceCardRef[]).map((s) => ({
-      id: s.id,
-      sourceCard: s.source.meta.name,
-      version: s.source.meta.version,
-      ref: s.source.def.ref,
-      bound: this.#registry.has(s.source.def.ref),
-    }));
+    // sources 由 uses 解析(未声明则为空:动态 invoke 无法静态穷举依赖)
+    const sources: InspectSource[] = entry.card.uses.flatMap((useName) => {
+      const sc = this.#sourceCards.get(useName);
+      if (!sc) return [];
+      return [
+        {
+          name: useName,
+          version: sc.manifest.version,
+          ref: sc.sourceCard.def.ref,
+          bound: this.#registry.has(sc.sourceCard.def.ref),
+        },
+      ];
+    });
     return {
       name: entry.manifest.name,
       version: entry.manifest.version,
-      fields: Object.keys((entry.card.def.glue as { shape: Record<string, unknown> }).shape).map(
-        (field) => ({
-          name: field,
-          kind: injectKeys.includes(field) ? ('extension' as const) : ('core' as const),
-          redact: redactKeys.includes(field),
-        }),
-      ),
+      // IR 键为请求期动态填充,静态不可穷举;此处仅呈现 seeds(extension)声明
+      fields: entry.card.seedKeys.map((field) => ({ name: field, kind: 'extension' as const })),
       sources,
       policy: entry.policy,
       manifest: entry.manifest,
@@ -367,7 +374,7 @@ export class RelayController {
     return [...this.#cards.values()].map((e) => ({
       name: e.manifest.name,
       version: e.manifest.version,
-      sources: e.card.sourceCardNames,
+      sources: e.card.uses,
     }));
   }
 
@@ -396,25 +403,19 @@ export class RelayController {
     };
   }
 
-  /** 控制面操作审计(谁在何时注册/变更了什么) */
-  getAuditLog(): readonly AuditEntry[] {
-    return this.#audit;
-  }
-
   // -------------------------------------------------------------------------
 
-  #buildRuntime(card: RelayCard, manifest: Manifest): { policy: ResolvedPolicy; runtimeConfig: Record<string, unknown> } {
+  #buildRuntime(manifest: Manifest): { policy: ResolvedPolicy; runtimeConfig: Record<string, unknown> } {
     const override = this.#policies.get(manifest.name);
     const policy: ResolvedPolicy = {
       timeoutMs: override?.timeoutMs ?? manifest.suggests?.timeoutMs,
       retry: override?.retry ?? manifest.suggests?.retry ?? { max: 0, backoff: 'expo' },
-      strategy: override?.strategy ?? manifest.suggests?.strategy ?? 'firstSuccess',
     };
     return { policy, runtimeConfig: { ...(this.#configs.get(manifest.name) ?? {}) } };
   }
 
   #record(action: string, target: string, detail?: unknown): void {
-    this.#audit.push({ ts: Date.now(), action, target, detail });
+    this.#onControlEvent?.({ action, target, detail });
   }
 }
 
@@ -423,7 +424,7 @@ function synthesizeManifest(card: RelayCard): Manifest {
     name: card.meta.name,
     version: card.meta.version,
     entry: '(inline)',
-    requires: { sources: [...card.sourceCardNames], injections: [...card.injectKeys] },
+    requires: { sources: [...card.uses], injections: [...card.seedKeys] },
   });
 }
 

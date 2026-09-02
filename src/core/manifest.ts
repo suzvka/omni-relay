@@ -10,7 +10,9 @@ export const ManifestSchema = z.object({
   entry: z.string().min(1),
   requires: z
     .object({
+      // 商品卡片:对应 card.uses(可能 invoke 的源站卡片名);源站卡片:其物理 ref
       sources: z.array(z.string()).default([]),
+      // 商品卡片:对应 card.seedKeys(宿主注入的 IR 初始键);源站卡片不支持
       injections: z.array(z.string()).default([]),
     })
     .default({ sources: [], injections: [] }),
@@ -23,7 +25,6 @@ export const ManifestSchema = z.object({
           backoff: z.enum(['fixed', 'expo']).default('expo'),
         })
         .optional(),
-      strategy: z.enum(['firstSuccess', 'race', 'all', 'scripted']).optional(),
     })
     .optional(),
 });

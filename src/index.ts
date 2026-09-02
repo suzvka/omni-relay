@@ -1,8 +1,7 @@
 export { defineCard } from './core/card';
 export { defineSource } from './core/sourceCard';
-export { inject, redact, relayMeta, scanGlueMeta } from './core/markers';
 export { ManifestSchema, parseManifest, readManifest } from './core/manifest';
-export { Bus } from './core/bus';
+export type { Manifest, ManifestInput } from './core/manifest';
 export { GlueError, RegistrationError } from './core/errors';
 export type { CheckSeam } from './core/errors';
 export { isReadableStream } from './core/stream';

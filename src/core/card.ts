@@ -1,76 +1,42 @@
 import * as z from 'zod';
 import { RegistrationError } from './errors';
-import { scanGlueMeta } from './markers';
-import type {
-  CardMeta,
-  RawCardDef,
-  RelayCard,
-  RelayMiddleware,
-  Seam,
-  SourceCard,
-} from './types';
-
-const VALID_SEAMS: readonly Seam[] = ['toGlue', 'bind', 'take', 'put', 'fromGlue'];
+import type { CardMeta, RawCardDef, RelayCard } from './types';
 
 /**
- * 定义一张商品卡片:5 件套(in/out/glue/toGlue+fromGlue/sources)。
+ * 定义一张商品卡片(v2 命令式双钩子:collect / respond)。
+ * 卡片是 IR 的编排者:collect 直读直写 IR、按需 invoke API 卡片把数据收集进来,
+ * respond 只读 IR 构筑出参;它只对 IR 契约负责,不接触源站细节——对接逻辑住在被 invoke 的源站卡片里。
  * 声明期即做自洽校验,"对不上"在这里就地报错。
- * sources 是对源站卡片的引用:对接逻辑住在源站卡片里,卡片只做参数映射与计算派生。
  */
 export function defineCard<
   TIn extends z.ZodType,
   TOut extends z.ZodType,
-  TGlue extends z.ZodObject<any>,
->(def: RawCardDef<TIn, TOut, TGlue>): RelayCard<RawCardDef<TIn, TOut, TGlue>> {
+>(def: RawCardDef<TIn, TOut>): RelayCard<RawCardDef<TIn, TOut>> {
   assertZod(def.in, 'in');
   assertZod(def.out, 'out');
-  if (!(def.glue instanceof z.ZodObject) && typeof (def.glue as any)?.shape !== 'object') {
-    throw new RegistrationError('glue 必须是 z.object(...)', 'card:glue');
+  if (typeof def.collect !== 'function') {
+    throw new RegistrationError('collect 必须是函数', 'card:collect');
   }
-  if (typeof def.toGlue !== 'function') {
-    throw new RegistrationError('toGlue 必须是函数', 'card:toGlue');
+  if (typeof def.respond !== 'function') {
+    throw new RegistrationError('respond 必须是函数', 'card:respond');
   }
-  if (typeof def.fromGlue !== 'function') {
-    throw new RegistrationError('fromGlue 必须是函数', 'card:fromGlue');
-  }
-  if (!Array.isArray(def.sources) || def.sources.length === 0) {
-    throw new RegistrationError('sources 至少声明一个源站卡片', 'card:sources');
-  }
-  const ids = new Set<string>();
-  const sourceCardNames: string[] = [];
-  for (const srcRef of def.sources) {
-    const sc = srcRef?.source as SourceCard | undefined;
-    if (!sc || typeof sc.def !== 'object' || typeof sc.meta?.name !== 'string' || !sc.meta.name) {
-      throw new RegistrationError(
-        '每个 source 必须引用 defineSource 定义的源站卡片',
-        'source:card',
-      );
+
+  // seeds:宿主注册期注入的 IR 初始键,每个值须为 Zod schema(buildRelay 上线门据此校验存在+类型)
+  const seedKeys: string[] = [];
+  for (const [key, schema] of Object.entries(def.seeds ?? {})) {
+    if (!schema || typeof (schema as { safeParse?: unknown }).safeParse !== 'function') {
+      throw new RegistrationError(`seeds.${key} 必须是 Zod schema`, 'card:seeds');
     }
-    if (typeof srcRef?.id !== 'string' || !srcRef.id) {
-      throw new RegistrationError(
-        `source(${sc.meta.name}) 必须声明 id(总线 res 命名空间键)`,
-        'source:id',
-      );
-    }
-    if (ids.has(srcRef.id)) {
-      throw new RegistrationError(`source id 重复: ${srcRef.id}`, 'source:id');
-    }
-    ids.add(srcRef.id);
-    sourceCardNames.push(sc.meta.name);
-    if (typeof srcRef.bind !== 'function') {
-      throw new RegistrationError(`source(${srcRef.id}).bind 必须是函数`, 'source:bind');
-    }
+    seedKeys.push(key);
   }
-  for (const mw of def.middlewares ?? []) {
-    if (!mw || !VALID_SEAMS.includes(mw.seam) || typeof mw.run !== 'function') {
-      throw new RegistrationError(
-        `中间件非法:需声明 seam(${VALID_SEAMS.join('/')}) 与 run 函数`,
-        'middleware',
-      );
+
+  // uses:可选,声明可能 invoke 的源站卡片名(非空字符串数组;仅供 manifest 交叉校验与 inspect)
+  if (def.uses !== undefined) {
+    if (!Array.isArray(def.uses) || def.uses.some((u) => typeof u !== 'string' || !u)) {
+      throw new RegistrationError('uses 必须是非空字符串数组', 'card:uses');
     }
   }
 
-  const { injectKeys, redactKeys } = scanGlueMeta(def.glue);
   const meta: CardMeta = {
     name: def.meta?.name ?? '',
     version: def.meta?.version ?? '0.0.0',
@@ -82,10 +48,9 @@ export function defineCard<
   return Object.freeze({
     def,
     meta,
-    injectKeys: Object.freeze(injectKeys),
-    redactKeys: Object.freeze(redactKeys),
-    sourceCardNames: Object.freeze(sourceCardNames),
-  }) as unknown as RelayCard<RawCardDef<TIn, TOut, TGlue>>;
+    seedKeys: Object.freeze(seedKeys),
+    uses: Object.freeze([...(def.uses ?? [])]),
+  }) as unknown as RelayCard<RawCardDef<TIn, TOut>>;
 }
 
 function assertZod(schema: unknown, where: string): void {
@@ -93,9 +58,4 @@ function assertZod(schema: unknown, where: string): void {
   if (!s || typeof s.safeParse !== 'function') {
     throw new RegistrationError(`${where} 必须是 Zod schema`, `card:${where}`);
   }
-}
-
-/** 收集某接缝的卡片中间件(保持声明顺序) */
-export function seamMiddlewares(def: RawCardDef<any, any, any>, seam: Seam): RelayMiddleware[] {
-  return (def.middlewares ?? []).filter((m: RelayMiddleware) => m.seam === seam);
 }

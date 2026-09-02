@@ -1,76 +1,52 @@
 import type * as z from 'zod';
-import type { Bus } from './bus';
 import type { Manifest } from './manifest';
 
 // ---------------------------------------------------------------------------
-// 字段品牌(schema 层标记的类型面,运行时标记见 markers.ts)
+// 执行阶段与钩子
 // ---------------------------------------------------------------------------
 
-declare const injectBrand: unique symbol;
-declare const redactBrand: unique symbol;
+/** 管道阶段:collect(入站请求处理)/ invoke(调用 API 卡片)/ respond(响应构筑) */
+export type Seam = 'collect' | 'invoke' | 'respond';
 
-/** inject() 标记的类型面:声明该字段由控制面运行时配置注入(extension 分区) */
-export interface InjectedBrand {
-  readonly [injectBrand]: true;
-}
-
-/** redact() 标记的类型面:声明该字段在审计摘要中脱敏 */
-export interface RedactedBrand {
-  readonly [redactBrand]: true;
-}
-
-export type Injected<T extends z.ZodType> = T & InjectedBrand;
-export type Redacted<T extends z.ZodType> = T & RedactedBrand;
-
-// ---------------------------------------------------------------------------
-// 管道与中间件
-// ---------------------------------------------------------------------------
-
-/** 管道接缝:toGlue(入参→总线)/ bind(总线→源站入参)/ take(源站入参→源站请求)/ put(源站响应→总线)/ fromGlue(总线→出参) */
-export type Seam = 'toGlue' | 'bind' | 'take' | 'put' | 'fromGlue';
-
-/** 洋葱中间件,声明作用于哪个接缝 */
-export interface RelayMiddleware {
-  readonly seam: Seam;
-  readonly name?: string;
-  run: (ctx: GlueCtx, next: () => Promise<void>) => Promise<void>;
-}
-
-/** 框架特权钩子:框架主权操作(审计/注入/屏蔽)的执行点,卡片不可覆盖 */
+/** 框架特权钩子:宿主规则在 IR 上的执行点(注入/屏蔽/审计),卡片不可覆盖 */
 export interface ControllerHooks {
-  /** glue 校验通过后、per-source 段之前;可读写 ctx.bus.req 实现注入/屏蔽 */
-  onBusReq?: (ctx: GlueCtx) => void | Promise<void>;
-  /** 源站响应写入 res.<srcId> 之后;可读写 ctx.bus.res 实现审计/屏蔽 */
-  onBusRes?: (ctx: GlueCtx) => void | Promise<void>;
+  /** in 校验通过、seeds 并入 IR 后、collect 之前;可读写 ctx.ir */
+  onBusReq?: (ctx: CollectCtx) => void | Promise<void>;
+  /** 每次 invoke 产物写入 ir[id] 之后;可读写 ctx.ir(ctx.sourceId 为本次源站卡片名) */
+  onBusRes?: (ctx: CollectCtx) => void | Promise<void>;
 }
 
-/** 贯穿一次 handle 的执行上下文 */
-export interface GlueCtx {
+/**
+ * 贯穿一次 handle 的执行上下文(collect 阶段)。
+ * IR(`ir`)是自由直读直写的键值对缓存:collect 往其中收集/填充数据,
+ * invoke 产物写入 `ir[id]`,respond 只读其中已有的值。
+ */
+export interface CollectCtx {
   readonly card: CardMeta;
-  bus: Bus;
+  /** ▸in 校验后的入站请求(collect 从这里取值填进 IR) */
+  readonly input: unknown;
+  /** IR:键值对缓存(已并入 seeds;invoke 产物写入 ir[id]) */
+  readonly ir: Record<string, unknown>;
   state: Map<unknown, unknown>;
   log: Logger;
   signal: AbortSignal;
-  /** 各阶段耗时(键:接缝名或 "<srcId>.<段>") */
+  /** 各阶段耗时(键:collect/respond 或 "<id>.fetch"/"<id>.invoke") */
   timing: Record<string, number>;
-  /** 请求级透传元数据(trace id 等),不进总线 */
+  /** 请求级透传元数据(trace id 等),不进 IR */
   meta: Record<string, unknown>;
   /**
-   * 编排原语(仅 scripted 策略可用):执行一次源站段,产物写入 res.<sourceId> 并返回。
-   * - invoke(id):走该 source 声明的 bind(glue);
-   * - invoke(id, input):跳过 bind,用显式 input(仍过 input 校验点);
-   * - 每次执行都经过完整管道(take/transport/put/校验点/onBusRes 钩子)。
+   * 编排原语:调用一张已注册的 API 卡片(源站卡片),产物写入 `ir[id]` 并返回。
+   * - invoke(id):从 IR 按 source.input 取入参(过 ▸input 校验);
+   * - invoke(id, input):用显式入参(仍过 ▸input);
+   * - 每次都走完整源站段(take/transport/retry/errorMap/put/各校验点/onBusRes)。
    */
-  invoke: (sourceId: string, input?: unknown) => Promise<unknown>;
-  // ---- 以下字段为 per-source 段隔离(race/并发时各源站持有浅拷贝) ----
+  invoke: (id: string, input?: unknown) => Promise<unknown>;
+  /** 当前 invoke 的源站卡片名(仅 onBusRes 期间的快照上有值) */
   sourceId?: string;
-  /** bind 产物(源站入参),经 input 校验点校验 */
-  sourceInput?: unknown;
-  /** take 产物,中间件可在 next 前改写 */
-  upstream?: UpstreamRequest;
-  /** 源站原始响应 */
-  raw?: { status: number; body: unknown };
 }
+
+/** respond 阶段上下文:与 collect 同形,但类型层移除 invoke(只读 IR 构筑响应) */
+export type RespondCtx = Omit<CollectCtx, 'invoke'>;
 
 // ---------------------------------------------------------------------------
 // HTTP / 源站
@@ -85,7 +61,7 @@ export type FetchLike = (
 export interface SourceBinding {
   baseURL: string;
   headers?: Record<string, string>;
-  /** 惰性取用,值不进总线、不进日志摘要 */
+  /** 惰性取用,值不进 IR、不进日志摘要 */
   auth?: () => AuthInput | Promise<AuthInput>;
   timeoutMs?: number;
   fetch?: FetchLike;
@@ -121,9 +97,9 @@ export interface CardMeta {
 }
 
 /**
- * 源站卡片原始定义(对接侧插件):封装"连接一个源站 + 清洗为原子字段"。
+ * 源站卡片原始定义(API 卡片 / 对接侧插件):封装"连接一个源站 + 清洗为原子字段"。
  * 对接者声明能力契约:需要哪些入参(input)、能提供哪些原子字段(output);
- * 业务卡片经 SourceCardRef 引用,不接触源站细节。
+ * collect 经 ctx.invoke 按名调用,不接触源站细节。
  */
 export interface RawSourceCardDef<
   TIn extends z.ZodType = z.ZodType,
@@ -134,9 +110,9 @@ export interface RawSourceCardDef<
   meta?: Partial<CardMeta>;
   /** 物理绑定引用(控制面经 registerSource 注入) */
   readonly ref: string;
-  /** 源站入参契约(可含分支字段,由 take 按值路由端点) */
+  /** 源站入参契约:invoke 省略入参时从 IR 按此 schema 取(可含分支字段,由 take 按值路由端点) */
   readonly input: TIn;
-  /** 原子字段契约(对接者承诺;流式源站惯例 z.custom<ReadableStream>,仅类型留档) */
+  /** 原子字段契约(对接者承诺;invoke 产物写入 ir[id];流式源站惯例 z.custom<ReadableStream>) */
   readonly output: TOut;
   /** 源站原始响应 schema(照抄对方文档;流式源站惯例 z.custom<ReadableStream>) */
   readonly upstreamRes: TUpRes;
@@ -159,19 +135,6 @@ export interface SourceCard<
   readonly meta: CardMeta;
 }
 
-/** 业务卡片对源站卡片的引用:id 为总线 res.<id> 命名空间键;bind 把业务 glue 映射为源站入参 */
-export interface SourceCardRef<
-  TGlue extends z.ZodObject<any> = z.ZodObject<any>,
-  TSc extends SourceCard<any> = SourceCard<any>,
-  TId extends string = string,
-> {
-  readonly source: TSc;
-  readonly id: TId;
-  readonly bind: (
-    glue: z.output<TGlue>,
-  ) => z.input<TSc['def']['input']> | Promise<z.input<TSc['def']['input']>>;
-}
-
 /** 源站业务错误映射:extract 提取源站码 → map(支持 "HTTP:404" 形态)→ fallback */
 export interface ErrorMapDef {
   extract?: (body: unknown) => string | null | undefined;
@@ -181,91 +144,58 @@ export interface ErrorMapDef {
   retryableCodes?: readonly string[];
 }
 
-/** 从 glue 类型中排除注入字段后的核心字段集(toGlue 的返回类型) */
-export type InjectKeysOf<TGlue extends z.ZodObject<any>> = {
-  [K in keyof z.output<TGlue>]: TGlue['shape'][K] extends InjectedBrand ? K : never;
-}[keyof z.output<TGlue> & string];
-
-export type GlueCoreOf<TGlue extends z.ZodObject<any>> = Omit<
-  z.output<TGlue>,
-  InjectKeysOf<TGlue>
->;
-
-/** 从源站卡片引用数组推导 res 命名空间束:{ [id]: 源站卡片 output } */
-export type ResBundleOf<TSrcs> = TSrcs extends readonly unknown[]
-  ? {
-      [S in TSrcs[number] as S extends SourceCardRef<any, any, infer TId>
-        ? TId
-        : never]: S extends SourceCardRef<any, infer TSc, any>
-        ? TSc extends SourceCard<infer TDef>
-          ? z.output<TDef['output']>
-          : never
-        : never;
-    }
-  : Record<string, never>;
-
-/** 卡片原始定义(5 件套;manifest 是独立配置文件) */
+/**
+ * 卡片原始定义(v2 命令式双钩子)。
+ * IR 是自由键值缓存:collect 直读直写 IR 并按需 invoke API 卡片把数据收集进来,
+ * respond 只读 IR 构筑出参。校验落在两端(in/out)与每次 invoke 的源站段(input/…)。
+ */
 export interface RawCardDef<
   TIn extends z.ZodType = z.ZodType,
   TOut extends z.ZodType = z.ZodType,
-  TGlue extends z.ZodObject<any> = z.ZodObject<any>,
 > {
   meta?: Partial<CardMeta>;
-  /** ① 商品入参 schema(我们定义) */
+  /** ① 入站请求契约(collect 的 ctx.input 来源;▸in 校验点) */
   in: TIn;
-  /** ⑥ 商品出参 schema(我们定义) */
+  /** ⑥ 出参契约(respond 产物;▸out 校验点) */
   out: TOut;
-  /** ② 总线 req 区 schema(显式声明,框架按字段操作) */
-  glue: TGlue;
-  /** ③ 入参 → 总线(只写 core 字段,inject 字段由框架合成) */
-  toGlue: (input: z.output<TIn>) => GlueCoreOf<TGlue> | Promise<GlueCoreOf<TGlue>>;
-  /** ④ 源站卡片引用:bind 把总线数据映射为源站入参 */
-  sources: readonly SourceCardRef<TGlue, any, any>[];
-  /** ⑤ 总线 → 出参(多源站聚合时显式合并各命名空间) */
-  fromGlue: (
-    glue: z.output<TGlue>,
-    res: ResBundleOf<this['sources']>,
-  ) => z.input<TOut> | Promise<z.input<TOut>>;
-  middlewares?: readonly RelayMiddleware[];
+  /** 宿主注册期注入的 IR 初始键(替代 inject):buildRelay 一次性校验存在 + 类型 */
+  seeds?: Record<string, z.ZodType>;
+  /** 可选:声明可能 invoke 的源站卡片名(manifest 交叉校验 + inspect 依赖边);不限制 invoke */
+  uses?: readonly string[];
+  /** 入站请求处理钩子:直读直写 ir、invoke API 卡片,把数据收集进 IR(业务过程本身) */
+  collect: (ctx: CollectCtx) => void | Promise<void>;
+  /** 响应构筑钩子:只读 ir、不可 invoke,产出 out */
+  respond: (ctx: RespondCtx) => z.input<TOut> | Promise<z.input<TOut>>;
 }
 
 /** defineCard 产物:def + 预计算的运行时元信息 */
-export interface RelayCard<TDef extends RawCardDef<any, any, any> = RawCardDef<any, any, any>> {
+export interface RelayCard<TDef extends RawCardDef<any, any> = RawCardDef<any, any>> {
   readonly def: TDef;
   readonly meta: CardMeta;
-  readonly injectKeys: readonly string[];
-  readonly redactKeys: readonly string[];
-  /** 引用的源站卡片名清单(与 manifest.requires.sources 交叉校验的依据) */
-  readonly sourceCardNames: readonly string[];
+  /** seeds 声明的键(与 manifest.requires.injections 交叉校验、buildRelay 上线门的依据) */
+  readonly seedKeys: readonly string[];
+  /** uses 声明的源站卡片名(与 manifest.requires.sources 交叉校验、inspect 依赖边) */
+  readonly uses: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
 // 策略与配置
 // ---------------------------------------------------------------------------
 
-/**
- * 多源站策略:
- * - firstSuccess/race/all:框架自动编排(runWithStrategy);
- * - scripted:源站段不自动执行,执行权在卡片编排逻辑(经 GlueCtx.invoke 按需驱动)。
- */
-export type MultiSourceStrategy = 'firstSuccess' | 'race' | 'all' | 'scripted';
-
 export interface RetryPolicy {
   max: number;
   backoff: 'fixed' | 'expo';
 }
 
-/** 卡片建议 + 框架覆盖后的解析结果 */
+/** 卡片建议 + 框架覆盖后的解析结果(多源容灾由 collect 手写,框架不再有策略) */
 export interface PolicyInput {
   timeoutMs?: number;
   retry?: RetryPolicy;
-  strategy?: MultiSourceStrategy;
 }
 
 export interface ResolvedPolicy {
   timeoutMs?: number;
   retry: RetryPolicy;
-  strategy: MultiSourceStrategy;
 }
 
 /** 注册选项（卡片与源站卡片通用） */
@@ -278,7 +208,7 @@ export interface RegisterOptions {
 /** 服务面调用选项 */
 export interface HandleOptions {
   signal?: AbortSignal;
-  /** 请求级元数据(trace id 等),进入 ctx.meta,不进总线 */
+  /** 请求级元数据(trace id 等),进入 ctx.meta,不进 IR */
   meta?: Record<string, unknown>;
   /** 关闭 6 个校验点(默认全开) */
   strict?: boolean;
@@ -291,14 +221,12 @@ export interface HandleOptions {
 export interface InspectField {
   name: string;
   kind: 'core' | 'extension';
-  redact: boolean;
 }
 
 export interface InspectSource {
-  id: string;
-  /** 引用的源站卡片名 */
-  sourceCard: string;
-  /** 引用的源站卡片版本(契约身份:回滚影响面=内嵌该版本的商品卡片集合) */
+  /** 源站卡片名(= invoke id = ir 命名空间键) */
+  name: string;
+  /** 源站卡片版本(契约身份:回滚影响面=内嵌该版本的商品卡片集合) */
   version: string;
   ref: string;
   bound: boolean;
@@ -318,7 +246,9 @@ export interface InspectSourceCardView {
 export interface InspectView {
   name: string;
   version: string;
+  /** seeds 声明的键(kind='extension');IR 其余键为请求期动态填充,不静态可知 */
   fields: InspectField[];
+  /** 由 uses 解析(未声明则为空:动态 invoke 无法静态穷举依赖) */
   sources: InspectSource[];
   policy: ResolvedPolicy;
   manifest: Manifest;
@@ -330,8 +260,7 @@ export interface CardSummary {
   sources: readonly string[];
 }
 
-export interface AuditEntry {
-  ts: number;
+export interface ControlEvent {
   action: string;
   target: string;
   detail?: unknown;
@@ -351,14 +280,16 @@ export interface Logger {
 export type FetchHandler = (req: Request) => Promise<Response>;
 
 export interface FetchHandlerOptions {
-  /** URL → 卡片名解析;缺省:pathname 首段 decodeURIComponent */
+  /** URL → 卡片名解析;缺省:整个 pathname(去首尾斜杠)decodeURIComponent */
   route?: (req: Request) => string | null | undefined | Promise<string | null | undefined>;
 }
 
 export interface RelayControllerOptions {
-  /** 框架特权钩子(审计/注入/屏蔽的执行点) */
+  /** 框架特权钩子:宿主规则的请求期执行点(IR),卡片不可覆盖 */
   hooks?: ControllerHooks;
   logger?: Logger;
   /** 卡片与源站均未声明超时时的兜底 */
   defaultTimeoutMs?: number;
+  /** 宿主治理事件回调(注册/卸载/配置/策略变更时触发);未配置则框架不留存任何条目 */
+  onControlEvent?: (event: ControlEvent) => void;
 }

@@ -1,25 +1,22 @@
-import { seamMiddlewares } from './card';
-import { Bus } from './bus';
 import { GlueError } from './errors';
-import { runWithStrategy, sleep } from './strategy';
 import { checkAt } from './validate';
 import { isReadableStream } from './stream';
+import type { Manifest } from './manifest';
 import type { SourceRegistry } from '../source/registry';
-import type { TransportFn } from '../source/transport';
 import { defaultTransport } from '../source/transport';
 import type {
+  CollectCtx,
   ControllerHooks,
-  GlueCtx,
   HandleOptions,
   Logger,
   RawSourceCardDef,
   RelayCard,
-  RelayMiddleware,
-  SourceCardRef,
+  ResolvedPolicy,
+  SourceBinding,
+  SourceCard,
   TransportResult,
   UpstreamRequest,
 } from './types';
-import type { ResolvedPolicy } from './types';
 
 /** 卡片在服务目录中的运行时状态(控制面快照产物) */
 export interface RegisteredCard {
@@ -28,62 +25,33 @@ export interface RegisteredCard {
   runtimeConfig: Record<string, unknown>;
 }
 
+/** 源站卡片注册表条目(中心化注册表:名 → 源站卡片 + manifest) */
+export interface SourceCardEntry {
+  sourceCard: SourceCard;
+  manifest: Manifest;
+}
+
 export interface PipelineDeps {
   registry: SourceRegistry;
+  /** 源站卡片注册表提供者:invoke 按名解析任意已注册 API 卡片 */
+  sourceCards: () => ReadonlyMap<string, SourceCardEntry>;
   hooks?: ControllerHooks;
   logger: Logger;
   defaultTimeoutMs: number;
-  /** 供测试替换传输层 */
-  transport?: TransportFn;
-}
-
-const transport: TransportFn = defaultTransport;
-
-/** 洋葱组合:中间件依次包裹 core,next() 后可访问本接缝产物 */
-function compose(
-  mws: readonly RelayMiddleware[],
-): (ctx: GlueCtx, core: () => Promise<void>) => Promise<void> {
-  return async (ctx, core) => {
-    let index = -1;
-    const dispatch = (i: number): Promise<void> => {
-      if (i <= index) return Promise.reject(new Error('next() 被多次调用'));
-      index = i;
-      const mw = mws[i];
-      if (mw) return mw.run(ctx, () => dispatch(i + 1));
-      return core();
-    };
-    return dispatch(0);
-  };
-}
-
-/** 框架特权钩子包成中间件:置于接缝最外层,next() 后审计/屏蔽产物 */
-function hookAsMw(
-  seam: RelayMiddleware['seam'],
-  fn: ((ctx: GlueCtx) => void | Promise<void>) | undefined,
-): RelayMiddleware[] {
-  return fn
-    ? [
-        {
-          seam,
-          name: 'framework-hook',
-          run: async (ctx, next) => {
-            await next();
-            await fn(ctx);
-          },
-        },
-      ]
-    : [];
 }
 
 function now(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * 执行一张卡片(管道执行序):
- * in① → toGlue+注入合成 → glue② → per-source(bind→input校验→[钩子/中间件]→take→request校验
- * →transport(重试)→业务映射→upstreamRes校验→put→output校验→[钩子res]→writeRes)
- * → fromGlue → out⑥。总线贯穿全程,失败挂 bus.err 后抛出。
+ * 执行一张卡片(v2 命令式双钩子):
+ * in① → seeds 并入 IR → [onBusReq] → collect(直读直写 IR + invoke) → respond(只读 IR) → out⑥。
+ * IR 贯穿全程;任何一跳失败都收敛为 GlueError 直接抛出。
  */
 export async function runCard(
   deps: PipelineDeps,
@@ -94,193 +62,123 @@ export async function runCard(
   const { card } = entry;
   const def = card.def;
   const strict = opts.strict ?? true;
-  const sources = def.sources as readonly SourceCardRef<any, any, any>[];
 
-  const bus = new Bus(card.redactKeys);
-  const sourceById = new Map(sources.map((s) => [s.id as string, s]));
-  const scripted = entry.policy.strategy === 'scripted';
+  // IR:键值对缓存,先并入宿主注册期注入的 seeds 值
+  const ir: Record<string, unknown> = { ...(entry.runtimeConfig ?? {}) };
 
-  /** 编排原语内核:守卫 → 执行一次源站段 → 返回 IR 产物 */
-  const runInvokedSource = async (
-    sourceId: string,
-    input: unknown,
-  ): Promise<unknown> => {
-    if (!scripted) {
-      throw new GlueError({
-        code: 'GLUE.CARD.INVOKE_FORBIDDEN',
-        message: `ctx.invoke 仅在 scripted 策略下可用(卡片 ${card.meta.name} 当前为 ${entry.policy.strategy})`,
-        retryable: false,
-        status: 500,
-        seam: 'control',
-      });
-    }
-    const src = sourceById.get(sourceId);
-    if (!src) {
-      throw new GlueError({
-        code: 'GLUE.CARD.SOURCE_NOT_DECLARED',
-        message: `卡片 ${card.meta.name} 未声明源站 ${sourceId}(须先在 sources 中声明)`,
-        retryable: false,
-        status: 500,
-        seam: 'control',
-        sourceId,
-      });
-    }
-    // per-source 隔离(并发安全):sourceInput/upstream/raw 各持浅拷贝,res 按命名空间写入
-    await runSource(
-      deps,
-      entry,
-      { ...ctx, sourceId },
-      src,
-      strict,
-      input !== undefined ? { input } : undefined,
-    );
-    return (ctx.bus.res as Record<string, unknown>)[sourceId];
-  };
+  // ① 入站请求
+  const parsedInput = strict ? checkAt('in', def.in, input) : input;
 
-  const ctx: GlueCtx = {
+  const ctx: CollectCtx = {
     card: card.meta,
-    bus,
+    input: parsedInput,
+    ir,
     state: new Map(),
     log: deps.logger,
     signal: opts.signal ?? new AbortController().signal,
     timing: {},
     meta: opts.meta ?? {},
-    invoke: (sourceId, input) => runInvokedSource(sourceId, input),
+    invoke: (id, given) => invokeSource(deps, entry.policy, ctx, id, given, strict),
   };
 
   try {
-    // ① 商品入参
-    const parsedInput = strict ? checkAt('in', def.in, input) : input;
+    // 宿主钩子:collect 前读写 IR(注入/屏蔽)
+    if (deps.hooks?.onBusReq) await deps.hooks.onBusReq(ctx);
 
-    // toGlue 接缝(钩子最外层,next 后可审计/屏蔽 bus.req)
-    const tGlue = now();
-    await compose([
-      ...hookAsMw('toGlue', deps.hooks?.onBusReq),
-      ...seamMiddlewares(def, 'toGlue'),
-    ])(ctx, async () => {
-      const core = await def.toGlue(parsedInput as never);
-      const full: Record<string, unknown> = { ...(core as Record<string, unknown>) };
-      for (const key of card.injectKeys) full[key] = entry.runtimeConfig[key];
-      bus.req = strict ? checkAt('glue', def.glue, full) : full;
-    });
-    ctx.timing['toGlue'] = now() - tGlue;
+    // collect 接缝:业务过程本身(往 IR 收集填充数据 + 按需 invoke API 卡片)
+    const tCollect = now();
+    await def.collect(ctx);
+    ctx.timing['collect'] = now() - tCollect;
 
-    // per-source 段(策略编排;scripted = 执行权在卡片,经 ctx.invoke 按需驱动,不自动执行)
-    const tSrc = now();
-    if (entry.policy.strategy !== 'scripted') {
-      await runWithStrategy(entry.policy.strategy, sources, (src) =>
-        runSource(deps, entry, ctx, src, strict),
-      );
-    }
-    ctx.timing['sources'] = now() - tSrc;
+    // respond 接缝:移除 invoke(类型层 + 运行时均不可再调 API 卡片),只读 IR 构筑出参
+    const tRespond = now();
+    const { invoke: _invoke, ...respondCtx } = ctx;
+    const rawOut = await def.respond(respondCtx);
+    ctx.timing['respond'] = now() - tRespond;
 
-    // fromGlue 接缝
-    const tOut = now();
-    await compose(seamMiddlewares(def, 'fromGlue'))(ctx, async () => {
-      const rawOut = await def.fromGlue(bus.req as never, bus.res as never);
-      bus.out = strict ? checkAt('out', def.out, rawOut) : rawOut;
-    });
-    ctx.timing['fromGlue'] = now() - tOut;
-
-    return bus.out;
+    return strict ? checkAt('out', def.out, rawOut) : rawOut;
   } catch (e) {
-    if (e instanceof GlueError) {
-      bus.err = e;
-      deps.logger.warn('relay 失败', { card: card.meta.name, digest: bus.digest() });
-    }
     // 释放已建立但未消费的源站流(切换/聚合中断时防连接悬挂)
-    for (const data of Object.values(bus.res)) {
-      if (isReadableStream(data)) data.cancel().catch(() => {});
+    for (const value of Object.values(ir)) {
+      if (isReadableStream(value)) value.cancel().catch(() => {});
     }
     throw e;
   }
 }
 
-/** 单源站段:bind → input校验 → take → request校验 → transport(重试+业务映射)
- *  → upstreamRes校验 → put → output校验 → [钩子res] → writeRes
- *  given 给定时跳过 bind 核心(invoke 显式传参场景;bind 接缝中间件仍包裹,input 校验点照跑) */
-async function runSource(
+/**
+ * 编排原语内核:解析源站卡片 → 执行一次完整源站段 → 产物写入 ir[id] 并返回。
+ * given 给定时用显式入参;否则从 IR 按 source.input 取(印证"确保 IR 已填好该 API 所需入参")。
+ * 并发安全:内部不写共享 ctx(仅 ir[id] 与 timing[<id>.*] 按键隔离),Promise.all 多路 invoke 互不踩。
+ */
+async function invokeSource(
   deps: PipelineDeps,
-  entry: RegisteredCard,
-  ctx: GlueCtx,
-  src: SourceCardRef<any, any, any>,
+  policy: ResolvedPolicy,
+  ctx: CollectCtx,
+  id: string,
+  given: unknown,
   strict: boolean,
-  given?: { input: unknown },
-): Promise<void> {
-  const srcId = src.id;
-  const srcDef = src.source.def;
-  // per-source 隔离字段(bus/state/timing 共享,sourceInput/upstream/raw/sourceId 独立)
-  const srcCtx: GlueCtx = { ...ctx, sourceId: srcId };
+): Promise<unknown> {
+  const entry = deps.sourceCards().get(id);
+  if (!entry) {
+    throw new GlueError({
+      code: 'GLUE.CARD.SOURCE_NOT_REGISTERED',
+      message: `未注册的 API 卡片: ${id}(先 registerSourceCard)`,
+      retryable: false,
+      status: 404,
+      seam: 'control',
+      sourceId: id,
+    });
+  }
+  const srcDef = entry.sourceCard.def;
   const binding = deps.registry.resolve(srcDef.ref);
   if (!binding) {
     throw GlueError.business('SOURCE_UNBOUND', `源站 ${srcDef.ref} 未绑定物理配置`, {
-      sourceId: srcId,
+      sourceId: id,
     });
   }
 
-  // bind 接缝(业务总线 → 源站入参;invoke 显式传参时跳过核心)
   const t0 = now();
-  await compose(seamMiddlewares(entry.card.def, 'bind'))(srcCtx, async () => {
-    const sInput = given ? given.input : await src.bind(srcCtx.bus.req as never);
-    srcCtx.sourceInput = strict ? checkAt('input', srcDef.input, sInput, srcId) : sInput;
-  });
-  ctx.timing[`${srcId}.bind`] = now() - t0;
+  // 入参:显式 given 优先,否则从 IR 取(过 ▸input 校验;source.input 从 IR 提取所需键)
+  const rawInput = given !== undefined ? given : ctx.ir;
+  const srcInput = strict ? checkAt('input', srcDef.input, rawInput, id) : rawInput;
 
-  // take 接缝
-  const t1 = now();
-  await compose(seamMiddlewares(entry.card.def, 'take'))(srcCtx, async () => {
-    const ureq = await srcDef.take(srcCtx.sourceInput as never);
-    // 源站请求契约是"子集校验":只验不重建(zod strip 会丢弃未声明的 method/path 等)
-    if (strict && srcDef.request) checkAt('request', srcDef.request, ureq, srcId);
-    srcCtx.upstream = ureq;
-  });
-  ctx.timing[`${srcId}.take`] = now() - t1;
+  // take → ▸request(源站请求契约是"子集校验":只验不重建)
+  const ureq = await srcDef.take(srcInput as never);
+  if (strict && srcDef.request) checkAt('request', srcDef.request, ureq, id);
 
   // transport + 重试 + 业务映射
-  const t2 = now();
-  const result = await fetchMapped(
-    deps,
-    entry.policy,
-    binding,
-    srcCtx.upstream as UpstreamRequest,
-    srcCtx.signal,
-    srcDef,
-    srcId,
-  );
-  ctx.timing[`${srcId}.fetch`] = now() - t2;
-  srcCtx.raw = { status: result.status, body: result.body };
+  const result = await fetchMapped(deps, policy, binding, ureq, ctx.signal, srcDef, id);
+  ctx.timing[`${id}.fetch`] = now() - t0;
 
   // 流式守卫:旁路校验是显式授予的特权,未声明 stream 的源站收到流式响应直接拒绝
   if (result.stream && !srcDef.stream) {
     throw GlueError.business(
       'UPSTREAM_STREAM_UNDECLARED',
-      `源站 ${srcId} 返回流式响应,但源站卡片未声明 stream: true`,
-      { sourceId: srcId },
+      `源站 ${id} 返回流式响应,但源站卡片未声明 stream: true`,
+      { sourceId: id },
     );
   }
 
-  // 源站原始响应校验(流式源站惯例声明 z.custom,校验天然通过;JSON 响应仍受 schema 约束)
+  // ▸upstreamRes(流式源站惯例声明 z.custom,校验天然通过)→ put → ▸output
   const upstreamData = strict
-    ? checkAt('upstreamRes', srcDef.upstreamRes, result.body, srcId)
+    ? checkAt('upstreamRes', srcDef.upstreamRes, result.body, id)
     : result.body;
+  let product = srcDef.put ? await srcDef.put(upstreamData as never) : upstreamData;
+  if (strict) product = checkAt('output', srcDef.output, product, id);
 
-  // put 接缝(钩子最外层,next 后可审计/屏蔽 res.<srcId>);流式源站 put 省略时流直写
-  await compose([
-    ...hookAsMw('put', deps.hooks?.onBusRes),
-    ...seamMiddlewares(entry.card.def, 'put'),
-  ])(srcCtx, async () => {
-    let busData = srcDef.put ? await srcDef.put(upstreamData as never) : upstreamData;
-    if (strict) busData = checkAt('output', srcDef.output, busData, srcId);
-    ctx.bus.writeRes(srcId, busData);
-  });
-  ctx.timing[`${srcId}.put`] = now() - t2;
+  // 写回 IR(命名空间 by id),触发宿主 onBusRes(带本次 sourceId 的快照)
+  ctx.ir[id] = product;
+  ctx.timing[`${id}.invoke`] = now() - t0;
+  if (deps.hooks?.onBusRes) await deps.hooks.onBusRes({ ...ctx, sourceId: id });
+  return product;
 }
 
 /** 传输 + 重试 + 业务错误映射;传输错误统一补全 sourceId */
 async function fetchMapped(
   deps: PipelineDeps,
   policy: ResolvedPolicy,
-  binding: Parameters<TransportFn>[0],
+  binding: SourceBinding,
   ureq: UpstreamRequest,
   signal: AbortSignal,
   src: RawSourceCardDef<any, any, any, any>,
@@ -289,13 +187,12 @@ async function fetchMapped(
   const maxRetries = Math.max(0, policy.retry?.max ?? 0);
   const backoff = policy.retry?.backoff ?? 'expo';
   const timeoutMs = policy.timeoutMs ?? binding.timeoutMs ?? deps.defaultTimeoutMs;
-  const doTransport = deps.transport ?? transport;
 
   let attempt = 0;
   for (;;) {
     let result: TransportResult;
     try {
-      result = await doTransport(binding, ureq, { signal, timeoutMs });
+      result = await defaultTransport(binding, ureq, { signal, timeoutMs });
     } catch (e) {
       if (e instanceof GlueError && e.retryable && attempt < maxRetries) {
         await sleep(backoff === 'expo' ? 200 * 2 ** attempt : 500);

@@ -8,7 +8,6 @@
   },
   "suggests": {
     "timeoutMs": 3000,
-    "retry": { "max": 2, "backoff": "expo" },
-    "strategy": "firstSuccess"
+    "retry": { "max": 2, "backoff": "expo" }
   }
 }

@@ -1,6 +1,6 @@
 # omni-relay 应转尽转·业务管线编排器
 
-> 以**商品卡片**为一等公民的 API 绑定框架：把任意源站 API 包装、绑定为对外稳定的商品 API；**中介总线**是框架按字段审计 / 注入 / 屏蔽的介入面。
+> 以**卡片**为一等公民的 API 绑定框架:把任意源站 API 包装为可复用的 **API 卡片**,业务卡片用**命令式双钩子**在一块 **IR 键值缓存**上编排它们,对外暴露稳定的商品 API;**IR** 是框架执行宿主规则(注入 / 屏蔽 / 审计)的介入面。
 
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
@@ -16,13 +16,13 @@
 - [数据流：一次 handle 发生了什么](#数据流一次-handle-发生了什么)
 - [快速开始](#快速开始)
 - [指南](#指南)
-  - [源站卡片（对接侧插件）](#源站卡片对接侧插件)
-  - [商品卡片（业务侧）](#商品卡片业务侧)
-  - [注入与脱敏](#注入与脱敏)
-  - [多源站策略与重试](#多源站策略与重试)
+  - [API 卡片（对接侧插件）](#api-卡片对接侧插件)
+  - [业务卡片（collect / respond 双钩子）](#业务卡片collect--respond-双钩子)
+  - [IR：键值缓存与 seeds 注入](#ir键值缓存与-seeds-注入)
+  - [编排原语 ctx.invoke 与多源容灾](#编排原语-ctxinvoke-与多源容灾)
   - [流式透传（SSE）](#流式透传sse)
   - [manifest 与版本治理](#manifest-与版本治理)
-  - [框架钩子与接缝中间件](#框架钩子与接缝中间件)
+  - [框架钩子](#框架钩子)
   - [暴露为 fetch handler](#暴露为-fetch-handler)
   - [测试](#测试)
 - [校验点与错误码](#校验点与错误码)
@@ -39,15 +39,15 @@
 当你需要把**多个异构上游源站**聚合成一套**对外稳定的商品 API** 时，会反复遇到同一批问题：
 
 - 每个上游的入参、鉴权、字段命名、错误码都不一样，脏字段容易泄漏到对外契约里；
-- 需要在转发链路里做**审计、脱敏、注入**，但这些治理动作不该和业务逻辑缠在一起；
+- 业务过程往往是**命令式**的：先取 A、用 A 的结果决定要不要取 B、失败要降级——用声明式数据流表达这些很别扭；
 - 上游会超时、限流、宕机，需要**重试与容灾切换**，且要能区分「可重试」与「业务性失败」；
-- 对接侧和业务侧往往是不同的人，**对接逻辑**（怎么连一个源站）和**业务逻辑**（怎么组合成商品）需要解耦、独立演进与版本化。
+- 对接侧和业务侧往往是不同的人，**对接逻辑**（怎么连一个源站）和**业务逻辑**（怎么编排成商品）需要解耦、独立演进与版本化。
 
-omni-relay 的回答是**卡片化 + 总线介入 + 双平面分离**：
+omni-relay 的回答是**卡片化 + IR 键值缓存 + 命令式双钩子**：
 
-- 每个能力都是一张可独立声明、注册、版本化、退役的**卡片**；
-- 转发链路收敛为一条**中介总线**，框架主权（审计/注入/屏蔽）住在总线上；
-- **控制面**负责治理（注册/绑定/注入/策略/审计），**服务面**负责执行（`handle` / `fetch`），两者分离，原子切换不断服。
+- 每个能力都是一张可独立声明、注册、版本化、卸载的**卡片**；
+- 一次执行围绕一块 **IR**（键值缓存）展开：业务卡片在 **collect** 钩子里直读直写 IR、按需 `invoke` API 卡片把数据收集进来，在 **respond** 钩子里只读 IR 构筑出参；
+- **控制面**负责治理（注册/绑定/注入/策略，治理动作经事件回调通知宿主），**服务面**负责执行（`handle` / `fetch`），两者分离，原子切换不断服。
 
 ---
 
@@ -55,38 +55,32 @@ omni-relay 的回答是**卡片化 + 总线介入 + 双平面分离**：
 
 | 概念 | 说明 | 定义方式 |
 | --- | --- | --- |
-| **源站卡片** | 对接侧插件：封装「连接一个源站 + 清洗为原子字段」。声明能力契约（需要什么入参、能提供哪些原子字段），**不知道谁消费**。 | `defineSource()` |
-| **商品卡片** | 业务侧：对外稳定的商品 API 契约。经 `sources` **引用**源站卡片，只做参数映射与计算派生，**不接触源站细节**。 | `defineCard()` |
-| **中介总线（Bus）** | 贯穿一次执行的三分区数据结构：`req`（商品入参）/ `res.<id>`（各源站命名空间）/ `out`（商品出参），外加 `err`。框架按字段审计/注入/屏蔽的介入面。 | 框架内部构造 |
-| **字段标记** | `inject()` 声明 extension 字段（注册期由控制面注入）；`redact()` 声明 core 字段在审计摘要中脱敏。 | `inject` / `redact` |
-| **管道接缝（Seam）** | `toGlue` / `bind` / `take` / `put` / `fromGlue` 五个接缝，中间件声明作用于哪个接缝。 | `middlewares` |
-| **控制面** | 卡片生命周期、源站绑定、配置注入、策略覆盖、审计、版本门禁。 | `RelayController` |
+| **API 卡片** | 对接侧插件：封装「连接一个源站 + 清洗为原子字段」。 | `defineSource()` |
+| **业务卡片** | 业务侧插件：对外稳定的商品 API。 | `defineCard()` |
+| **IR** | 贯穿一次执行的键值缓存，框架执行宿主规则的介入面。 | 框架内部构造，`ctx.ir` |
+| **seeds** | 宿主注册期注入的 IR 初始键；`buildRelay` 上线门一次性校验其存在 + 类型。 | `seeds` + `setRuntimeConfig` |
+| **编排原语** | `ctx.invoke(id, input?)`：调用一张已注册 API 卡片，产物写回 IR 并返回。 | `CollectCtx.invoke` |
+| **控制面** | 卡片注册与卸载、源站绑定、seeds 注入、策略覆盖、治理事件通知、版本门禁。 | `RelayController` |
 | **服务面** | 程序化调用 `handle`，或暴露为框架无关的 `fetch` handler。 | `Relay` |
 
-**双层卡片**是理解 omni-relay 的关键：源站卡片是「标准化的对接模块」，商品卡片是「顶层业务」；对接者向中心化注册表注册自己的能力，业务卡片按名引用，两侧解耦、各自演进。
+**自封装卡片**是理解 omni-relay 的关键：API 卡片是「标准化的对接模块」，业务卡片是「顶层业务」；对接者向中心化注册表注册自己的能力，业务卡片在 `collect` 里按名 `invoke`，两侧解耦、各自演进。
 
 ---
 
 ## 数据流：一次 handle 发生了什么
 
 ```
-商品入参
-  │  ▸ 校验点 in
+入站请求
+  │  
   ▼
-toGlue  →  合成 inject 字段  →  ▸ 校验点 glue  →  bus.req
-  │        [钩子 onBusReq、toGlue 中间件：审计 / 注入 / 屏蔽]
-  ▼
-per-source 段（策略：firstSuccess / race / all / scripted）
-  bind → ▸input → take → ▸request → transport（超时 / 重试 / 业务错误映射）
-       → ▸upstreamRes → put → ▸output → bus.res.<id>
-  │        [钩子 onBusRes、bind / take / put 中间件]
-  ▼
-fromGlue（聚合 res 各命名空间）  →  ▸out  →  bus.out  →  商品出参
+信息收集 ---
+  |       | 业务过程
+  ▼       |
+响应构筑 ---
+  |
+  ▼ 
+返回响应
 ```
-
-- **总线贯穿全程**：任何一跳失败都收敛为 `GlueError`，挂到 `bus.err` 后抛出；
-- **校验点默认全开**：`handle(name, input, { strict: false })` 可整体跳过（脏数据直通）；
-- **框架钩子置于接缝最外层**：`next()` 后可审计/屏蔽产物，卡片中间件无法覆盖框架主权。
 
 ---
 
@@ -105,15 +99,15 @@ pnpm add omni-relay zod      # zod 是 peer 依赖（^4.0.0），需一并安装
 
 ```ts
 import { z } from 'zod';
-import { defineCard, defineSource, inject, redact, RelayController } from 'omni-relay';
+import { defineCard, defineSource, RelayController } from 'omni-relay';
 
-// 1) 源站卡片：封装「连接一个源站 + 清洗为原子字段」（对接侧插件）
+// 1) API 卡片：封装「连接一个源站 + 清洗为原子字段」（对接侧插件）
 const jdItemDetail = defineSource({
   meta: { name: 'jd.item-detail', version: '1.0.0' },
   ref: 'jd/items/detail',                    // 逻辑 ref，控制面据此绑定物理地址
 
-  input: z.object({ skuId: z.string() }),    // 我需要什么入参
-  output: z.object({                         // 我能提供哪些原子字段
+  input: z.object({ skuId: z.string() }),    // invoke 省略入参时从 IR 读取的键
+  output: z.object({                         // invoke 写回 IR 的原子字段
     title: z.string(),
     priceCents: z.number(),
     inStock: z.boolean(),
@@ -130,7 +124,7 @@ const jdItemDetail = defineSource({
     params: { skuId },
     query: { fmt: 'json' },
   }),
-  put: (raw) => ({                           // 源站响应 → 原子字段（脏字段挡在总线之外）
+  put: (raw) => ({                           // 源站响应 → 原子字段（脏字段挡在 IR 之外）
     title: raw.item_name,
     priceCents: Math.round(raw.price * 100),
     inStock: raw.stock > 0,
@@ -142,41 +136,43 @@ const jdItemDetail = defineSource({
   },
 });
 
-// 2) 商品卡片：对外稳定的商品 API（业务侧，只做映射与派生）
+// 2) 业务卡片：对外稳定的商品 API（命令式双钩子）
 const skuDetail = defineCard({
   meta: { name: 'product.detail', version: '1.0.0' },
 
   in: z.object({ sku: z.string(), count: z.number().int().positive().default(1) }),
   out: z.object({ name: z.string(), cents: z.number(), available: z.boolean() }),
 
-  glue: z.object({                           // 总线 req 区：框架按字段审计 / 注入 / 屏蔽
-    skuId: z.string(),
-    quantity: z.number(),
-    tenantId: inject(z.string()),            // extension：注册期由运行时配置注入
-    internalTag: redact(z.string()),         // core：审计摘要自动脱敏
-  }),
+  seeds: { tenantId: z.string() },           // 宿主注册期注入的 IR 初始键
+  uses: ['jd.item-detail'],                  // 声明可能 invoke 的 API 卡片（供治理/inspect）
 
-  toGlue: ({ sku, count }) => ({ skuId: sku, quantity: count ?? 1, internalTag: `tag:${sku}` }),
-  sources: [{ source: jdItemDetail, id: 'jd', bind: (g) => ({ skuId: g.skuId }) }],
-  fromGlue: (_g, res) => ({
-    name: res.jd.title,
-    cents: res.jd.priceCents,
-    available: res.jd.inStock,
-  }),
+  // collect：入站请求 → IR，再 invoke 把数据收集进 IR
+  collect: async (ctx) => {
+    const { sku, count } = ctx.input as { sku: string; count?: number };
+    ctx.ir.skuId = sku;                      // 填 IR：jd 的 input 需要 skuId
+    ctx.ir.quantity = count ?? 1;
+    await ctx.invoke('jd.item-detail');      // 省略入参 → 从 IR 按 input 取 skuId
+  },
+
+  // respond：只读 IR（ir['jd.item-detail'] 是 invoke 写回的原子字段）
+  respond: (ctx) => {
+    const jd = ctx.ir['jd.item-detail'] as { title: string; priceCents: number; inStock: boolean };
+    return { name: jd.title, cents: jd.priceCents, available: jd.inStock };
+  },
 });
 
-// 3) 控制面：绑定物理源站 → 注册卡片 → 注入配置 → 上线
+// 3) 控制面：绑定物理源站 → 注册卡片 → 注入 seeds → 上线
 const controller = new RelayController();
 controller
   .registerSource('jd/items/detail', {
     baseURL: 'https://api.jd.example.com',
-    auth: () => process.env.JD_TOKEN!,       // 惰性取用，值不进总线、不进日志摘要
+    auth: () => process.env.JD_TOKEN!,       // 惰性取用，值不进 IR
   })
   .registerSourceCard(jdItemDetail)
   .registerCard(skuDetail)
   .setRuntimeConfig('product.detail', { tenantId: 'T-01' });
 
-const relay = controller.buildRelay();       // 上线门：注入字段齐备才产出 Relay
+const relay = controller.buildRelay();       // 上线门：seeds 存在 + 类型齐备才产出 Relay
 
 // 4) 服务面：程序化调用（成功返回 out，失败抛 GlueError）
 const out = await relay.handle('product.detail', { sku: 'A1' });
@@ -189,15 +185,15 @@ const out = await relay.handle('product.detail', { sku: 'A1' });
 
 ## 指南
 
-### 源站卡片（对接侧插件）
+### API 卡片（对接侧插件）
 
-`defineSource()` 声明「怎么连一个源站、能清洗出哪些原子字段」。对接者只声明能力契约，**不知道谁消费**；注册进中心化注册表后，任何商品卡片均可按名引用。
+`defineSource()` 声明「怎么连一个源站、能清洗出哪些原子字段」。对接者只声明能力契约，**不知道谁消费**；注册进中心化注册表后，任何业务卡片均可在 `collect` 里按名 `invoke`。
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `meta` | 是 | `{ name, version }`，卡片契约身份 |
+| `meta` | 是 | `{ name, version }`，卡片契约身份（`name` 即 `invoke` 的 id） |
 | `ref` | 是 | 逻辑 ref，控制面经 `registerSource` 注入物理绑定 |
-| `input` | 是 | 源站入参契约（可含分支字段，由 `take` 按值路由端点） |
+| `input` | 是 | 源站入参契约：`invoke` 省略入参时据此**从 IR 提取**所需键 |
 | `output` | 是 | 原子字段契约（对接者的承诺；流式源站惯例 `z.custom<ReadableStream>`） |
 | `upstreamRes` | 是 | 源站原始响应 schema（照抄对方文档） |
 | `take` | 是 | 源站入参 → `UpstreamRequest`（`method` / `path` / `params` / `query` / `headers` / `body`） |
@@ -208,94 +204,67 @@ const out = await relay.handle('product.detail', { sku: 'A1' });
 
 `errorMap` 的解析顺序：`extract(body)` 提取源站码 → 查 `map[code]` → 查 `map["HTTP:<status>"]` → 非 2xx 兜底 `fallback`（缺省 `UPSTREAM_UNKNOWN`）。命中 `retryableCodes` 的映射码会驱动重试。
 
-### 商品卡片（业务侧）
+### 业务卡片（collect / respond 双钩子）
 
-`defineCard()` 声明「5 件套 + 出参」，`sources` 是对源站卡片的引用：
+`defineCard()` 声明「入站/出参契约 + 两个钩子」：
 
 | 字段 | 说明 |
 | --- | --- |
-| `in` / `out` | 商品 API 的入参 / 出参契约（我们定义） |
-| `glue` | 总线 `req` 区 schema（`z.object`），框架按字段操作的对象 |
-| `toGlue` | 入参 → 总线；**只写 core 字段**，`inject` 字段由框架合成（类型上已被排除） |
-| `sources` | `SourceCardRef[]`：`{ source, id, bind }`，`id` 是总线 `res.<id>` 命名空间键，`bind` 把总线数据映射为源站入参 |
-| `fromGlue` | 总线 → 出参；多源站聚合时显式合并各命名空间（`res.a` / `res.b` …） |
-| `middlewares` | 接缝中间件（见下） |
+| `in` / `out` | 商品 API 的入站请求 / 出参契约（我们定义；两端 `▸in` / `▸out` 校验点） |
+| `seeds` | 可选，`{ 键: Zod schema }`：宿主注册期注入的 IR 初始键；`buildRelay` 一次性校验存在 + 类型 |
+| `uses` | 可选，`string[]`：声明可能 `invoke` 的 API 卡片名（供 manifest 交叉校验 / `inspectCard` 依赖边）；**不限制** `invoke` |
+| `collect` | **入站请求处理钩子**：`(ctx: CollectCtx) => void \| Promise<void>`。业务过程本身——直读直写 `ctx.ir`、按需 `ctx.invoke` 把数据收集进 IR |
+| `respond` | **响应构筑钩子**：`(ctx: RespondCtx) => out`。只读 IR 构筑出参；`RespondCtx` 类型层无 `invoke` |
 
-声明期即做自洽校验：`glue` 非 `z.object`、`sources` 为空、`id` 重复、`bind` 缺失、中间件非法等「对不上」都在 `defineCard` / `defineSource` **就地报错**（`RegistrationError`），不留到运行时。
+声明期即做自洽校验：`in`/`out` 非 Zod、`collect`/`respond` 非函数、`seeds` 值非 Zod、`uses` 含空串、缺 `meta.name` 等「对不上」都在 `defineCard` / `defineSource` **就地报错**（`RegistrationError`），不留到运行时。
 
-### 注入与脱敏
+`collect` 与 `respond` 本质同形（都在 IR 上工作），强制二分只为**语义清晰与过程可见**：取数在 collect、构筑在 respond，读代码时一眼可辨。
 
-```ts
-glue: z.object({
-  tenantId: inject(z.string()),      // extension：值由控制面注册期注入，toGlue 不负责
-  apiKey: redact(z.string()),        // core：审计摘要 / digest 中自动打码（***xx）
-})
-```
+### IR：键值缓存与 seeds 注入
 
-- **`inject`**：声明「运行时差异」字段（租户、密钥、区域等）。`toGlue` 类型上被排除这些字段，框架在合成 `bus.req` 时从 `setRuntimeConfig` 取值填入；`take` / `fromGlue` 可信任其存在。`buildRelay()` 会校验所有 `inject` 字段均可满足，否则拒绝上线。
-- **`redact`**：声明「敏感」core 字段。`Bus.digest()` 递归打码，供审计/日志消费；源站原始响应体 `raw` 永不进入摘要，也永不透出商品侧。
+IR（`ctx.ir`）是一块 `Record<string, unknown>` 键值缓存，贯穿一次执行：
 
-注入是**注册期静态**的（每次 `setRuntimeConfig` 更新）；请求期的动态数据一律由 `toGlue` 写入。
+- **seeds**：宿主经 `setRuntimeConfig(name, config)` 在注册期注入的初始键（租户、密钥、区域等），在 `collect` 前并入 IR。`buildRelay()` 会用 `seeds` 声明的 schema 一次性校验每个 seed 值**存在且类型正确**，否则拒绝上线——这份静态校验只在上线门跑一次，不摊到每次请求。
+- **collect 填充**：请求期的动态数据一律由 `collect` 直写 IR（`ctx.ir.skuId = ...`），把入站请求格式化为后续 `invoke` 所需的键。
+- **invoke 写回**：每次 `ctx.invoke(id)` 的产物写入 `ir[id]`（命名空间 = API 卡片名，避免碰撞），同时作为返回值可直接使用。
+- **respond 只读**：`respond` 只消费 IR 中已有的值。
 
-### 多源站策略与重试
+IR 全程公开可读——宿主的字段级治理动作（摘要、屏蔽等）在 `onBusReq` / `onBusRes` 钩子中按**宿主自身规则**实现，框架不内建任何具体规则。
 
-一张商品卡片可引用多个源站卡片。策略由 `manifest.suggests` 建议、控制面 `setPolicy` 覆盖（**框架主权**）：
+### 编排原语 ctx.invoke 
 
-| 策略 | 行为 |
-| --- | --- |
-| `firstSuccess`（默认） | 顺序执行；**仅 `retryable` 错误**切换下一个源站，业务性失败直接抛出 |
-| `race` | 并发执行，首个成功者胜出（全部失败时抛聚合错误的第一个） |
-| `all` | 全部执行（聚合场景，`fromGlue` 合并各命名空间） |
-| `scripted` | 源站段**不自动执行**：执行权在卡片编排逻辑，经 `ctx.invoke` 按需、按序、可并发驱动（见下） |
+`ctx.invoke(id, input?)` 调用一张**已注册**的 API 卡片，每次都走**完整源站段**，产物会出现在 IR 中：
 
-重试由 `RetryPolicy { max, backoff: 'fixed' | 'expo' }` 控制。`retryable` 是重试/切换源站的**唯一信号**：传输层 `TIMEOUT` / `NETWORK` 天然可重试，业务错误需命中 `errorMap.retryableCodes` 才可重试。
+- `invoke(id)`：省略入参 → 从 IR 按 `source.input` **提取并校验**所需键（印证「调用前确保 IR 已填好该 API 入参」）；
+- `invoke(id, input)`：显式入参（仍过 `▸input` 校验），用于携带上一步产物或派生参数；
+- `id` 未注册 → `GLUE.CARD.SOURCE_NOT_REGISTERED`；其 `ref` 未绑定 → `GLUE.BUSINESS.SOURCE_UNBOUND`；
+- **并发安全**：每次 invoke 内部隔离，`Promise.all` 多路 invoke 互不踩（同一 `id` 重复 invoke 为 last-write-wins）。
 
 ```ts
-controller.setPolicy('product.detail', {
-  timeoutMs: 3000,
-  retry: { max: 2, backoff: 'expo' },
-  strategy: 'firstSuccess',
-});
+collect: async (ctx) => {
+  let lastErr: unknown;
+  for (const id of ['endpoint.a', 'endpoint.b']) {
+    try {
+      await ctx.invoke(id);
+      return;                                  // 首个成功即胜出
+    } catch (e) {
+      if (e instanceof GlueError && e.retryable) { lastErr = e; continue; }
+      throw e;                                 // 业务性失败不切换，直接抛出
+    }
+  }
+  throw lastErr;
+},
 ```
 
-解析优先级：`setPolicy` 覆盖 > `manifest.suggests` > 框架默认（`timeoutMs` 兜底为 `defaultTimeoutMs`，缺省 10s；`retry` 缺省 `{ max: 0 }`；`strategy` 缺省 `firstSuccess`）。
-
-#### scripted 与编排原语 ctx.invoke
-
-`scripted` 策略把 per-source 段的执行权交给**卡片自带的编排逻辑**（`middlewares`）：`sources` 照常声明（保住 manifest 交叉校验、`inspectCard` 依赖边视图与绑定就绪门禁），但不自动运行；编排代码经 `ctx.invoke(sourceId, input?)` 按需、按序、可并发地驱动源站段。
+`timeoutMs` / `retry`（`{ max, backoff: 'fixed' | 'expo' }`）由 `setPolicy` 覆盖 > `manifest.suggests` > 框架默认（`timeoutMs` 再兜底 `registerSource` 的 `binding.timeoutMs`、最终 `defaultTimeoutMs`，缺省 10s；`retry` 缺省 `{ max: 0 }`），逐次 invoke 生效。`retryable` 由传输层（`TIMEOUT`/`NETWORK` 天然可重试）与 `errorMap.retryableCodes` 决定。
 
 ```ts
-defineCard({
-  // ...
-  sources: [
-    { source: tokenSc, id: 'token', bind: (g) => ({ productId: g.productId }) },
-    { source: deductSc, id: 'deduct', bind: (g) => ({ /* ... */ }) },
-  ],
-  middlewares: [{
-    seam: 'fromGlue',
-    run: async (ctx, next) => {
-      const token = await ctx.invoke('token');            // 省略 input → 走 bind(glue)
-      const req = ctx.bus.req as { accountId: string; points: number };
-      await ctx.invoke('deduct', {                        // 显式 input → 跳过 bind,仍过 input 校验点
-        token: (token as { value: string }).value,        // 上一步产物可直读
-        accountId: req.accountId, points: req.points,
-      });
-      await next();                                       // fromGlue 从 res.token / res.deduct 读 IR
-    },
-  }],
-  // ...
-});
-controller.setPolicy('orchestrate.deduct', { strategy: 'scripted' });
+controller.setPolicy('product.detail', { timeoutMs: 3000, retry: { max: 2, backoff: 'expo' } });
 ```
-
-- 每次 `invoke` 都走**完整源站段**（take / transport / put / 各校验点），产物写入 `res.<id>`（IR），`onBusRes` 钩子逐步触发，`digest()` 全量可见——治理主权不因编排旁路；
-- 仅 `scripted` 策略下可用，否则 `GLUE.CARD.INVOKE_FORBIDDEN`；未声明的 id → `GLUE.CARD.SOURCE_NOT_DECLARED`；
-- 多源容灾不再自动：降级由编排逻辑 `try/catch` 决定；`timeoutMs` / `retry` / `errorMap` 仍按源站卡片逐次生效；
-- 并发安全：per-source 段隔离字段各持浅拷贝，`Promise.all` 多路 `invoke` 互不踩（同一 `id` 重复 invoke 为 last-write-wins）。
 
 ### 流式透传（SSE）
 
-源站卡片声明 `stream: true` 后，`text/event-stream` 响应**旁路校验**、`put` 可省略，流直写 `res.<id>`；商品卡片 `out` 声明为 `z.custom<ReadableStream<Uint8Array>>()`，`fromGlue` 直通即可。
+API 卡片声明 `stream: true` 后，`text/event-stream` 响应**旁路校验**、`put` 可省略，流直写 `ir[id]`；业务卡片 `out` 声明为 `z.custom<ReadableStream<Uint8Array>>()`，`respond` 直通即可。
 
 ```ts
 const llmChat = defineSource({
@@ -310,13 +279,13 @@ const llmChat = defineSource({
     path: '/v1/chat/completions',
     body: { prompt, stream: true },
   }),
-  // put 省略：流直写 res.<id>
+  // put 省略：流直写 ir[id]
 });
 ```
 
 - **未声明 `stream` 却收到流式响应** → `GLUE.BUSINESS.UPSTREAM_STREAM_UNDECLARED`（拒绝静默旁路）；
 - 超时只覆盖到**流建立**，消费期不受 `timeoutMs` 限制；
-- 失败/切换时会 `cancel()` 已建立但未消费的流，防连接悬挂；
+- 失败时会 `cancel()` 已建立但未消费的流，防连接悬挂；
 - 经 `toFetchHandler` 暴露时，流式 `out` 自动作为 `text/event-stream` Response 直通；
 - 需对流做加工（协议适配、事件重排）时，用原语 `sseEvents(stream)` / `parseSseJson(data)`。
 
@@ -330,59 +299,48 @@ manifest 是**框架级卡片契约**（配置文件，部署唯一事实）；s
   "version": "1.0.0",
   "entry": "./index.js",
   "requires": { "sources": ["jd.item-detail"], "injections": ["tenantId"] },
-  "suggests": { "timeoutMs": 3000, "retry": { "max": 2, "backoff": "expo" }, "strategy": "firstSuccess" }
+  "suggests": { "timeoutMs": 3000, "retry": { "max": 2, "backoff": "expo" } }
 }
 ```
 
-- `manifest` 可省略（由代码合成）；提供时校验 `name` / `version` / `requires.sources` / `requires.injections` 与代码一致。
+- `manifest` 可省略（由代码合成）；提供时校验 `name` / `version` / `requires.sources`（对 `uses`）/ `requires.injections`（对 `seeds` 键）与代码一致。
 - Node 便捷入口：`await controller.registerCardFromManifest('./cards/sku-detail/card.json')`（`entry` 动态 import，default 导出须为卡片）。
 
-> ⚠️ **`requires.sources` 两侧同名不同义**：**商品卡片**里列出的是「引用的**源站卡片名**」（如 `jd.item-detail`）；**源站卡片**自己列出的是「物理绑定 **ref**」（如 `jd/items/detail`，它直接依赖绑定）。用于部署编排工具时需注意区分。
+> ⚠️ **`requires.sources` 两侧同名不同义**：**业务卡片**里列出的是 `uses`（可能 invoke 的 **API 卡片名**，如 `jd.item-detail`）；**API 卡片**自己列出的是「物理绑定 **ref**」（如 `jd/items/detail`）。
 
-**版本门禁**（框架不留版本史，历史是宿主制品层的责任）：
+**版本门禁**：
 
 - 同名同版本 → 拒绝（`version:duplicate`）；
-- 低于当前服务版本 → 默认拒绝（防误发旧版）；显式声明回滚意图 `registerCard(card, manifest, { rollback: true })` 方可重发旧版制品，**原子替换** current（无下线窗口）；
-- `deregisterCard(name)` = **退役**（退出服务目录，`handle` 即 `CARD.NOT_FOUND`；in-flight 请求持旧引用跑完，不断服）。退役 ≠ 回滚。
+- 低于当前服务版本 → 默认拒绝（防误发旧版）；
+- `deregisterCard(name)` = **卸载**（从服务目录移除当前卡片，`handle` 即 `CARD.NOT_FOUND`；in-flight 请求持旧引用跑完，不断服）。
 
-服务目录为 `name → current`（每名字仅一份），服务面每次 `handle` **实时解析** → 原子切换。
+> 卸载 API 卡片的影响面：v2 下 `collect` 经 `ctx.invoke` **按名动态解析** API 卡片，卸载后 invoke 即 `SOURCE_NOT_REGISTERED`——依赖是运行时解析的，不再内嵌副本。
 
-### 框架钩子与接缝中间件
+服务目录为 `name → current`（每名字仅一份）：服务面每次 `handle` **实时解析** → 原子切换；升级与回滚都只是注册链上的一次版本号比较 + 原子替换，不存在下线窗口。
 
-两者都是洋葱模型，但**主权不同**：
+### 框架钩子
 
-- **框架钩子（`ControllerHooks`）**：框架特权（审计/注入/屏蔽）的执行点，**卡片不可覆盖**，置于接缝最外层。
-  - `onBusReq`：`glue` 校验通过后、per-source 段之前，可读写 `ctx.bus.req`；
-  - `onBusRes`：源站响应写入 `res.<id>` 之后，可读写 `ctx.bus.res`。
-- **接缝中间件（`middlewares`）**：卡片自带的洋葱层，声明作用于哪个接缝（`toGlue` / `bind` / `take` / `put` / `fromGlue`）。
+宿主规则在 IR 上的执行点，**卡片不可覆盖**：
+
+- `onBusReq`：`▸in` 校验通过、seeds 并入 IR 后、`collect` 之前，可读写 `ctx.ir`（宿主预填/屏蔽上下文）；
+- `onBusRes`：每次 `invoke` 产物写入 `ir[id]` 之后，可读写 `ctx.ir`（`ctx.sourceId` 为本次 API 卡片名）。
 
 ```ts
 const controller = new RelayController({
+  onControlEvent: (e) => audit.write(e),                            // 控制面治理事件
   hooks: {
-    onBusReq: (ctx) => { (ctx.bus.req as any).internalTag = '***'; },  // 屏蔽
-    onBusRes: (ctx) => { audit.write(ctx.bus.digest()); },              // 审计
+    onBusReq: (ctx) => { ctx.ir.tenantId = mask(ctx.ir.tenantId); },  // 屏蔽/改写
+    onBusRes: (ctx) => { audit.write(snapshotOf(ctx.ir)); },           // 宿主自定快照/摘要
   },
-});
-
-// 卡片中间件：next() 前改写、next() 后读取本接缝产物
-defineCard({
-  // ...
-  middlewares: [{
-    seam: 'take',
-    run: async (ctx, next) => {
-      await next();                                  // take 产物就绪、transport 未执行
-      ctx.upstream = { ...ctx.upstream!, headers: { 'x-trace': ctx.meta.traceId as string } };
-    },
-  }],
 });
 ```
 
-`GlueCtx` 贯穿一次执行，含 `card` / `bus` / `state` / `log` / `signal` / `timing` / `meta` / `invoke`（编排原语，scripted 专用），以及 per-source 段隔离的 `sourceId` / `sourceInput` / `upstream` / `raw`。
+`CollectCtx` 含 `card` / `input` / `ir` / `state` / `log` / `signal` / `timing` / `meta` / `invoke` / `sourceId`；`RespondCtx` 与之同形但**无 `invoke`**。
 
 ### 暴露为 fetch handler
 
 ```ts
-const handler = relay.toFetchHandler();     // 缺省路由：pathname 首段 decodeURIComponent = 卡片名
+const handler = relay.toFetchHandler();     // 缺省路由：整个 pathname（去首尾斜杠）decodeURIComponent = 卡片名
 // 或自定义路由：relay.toFetchHandler({ route: (req) => parseCardName(req) })
 
 const res = await handler(new Request('https://x/product.detail', {
@@ -420,17 +378,18 @@ lastBody(src.mock);       // 断言请求体
 
 ## 校验点与错误码
 
-管道上有 7 个 Zod 校验点（`strict: false` 可整体跳过），失败即收敛为 `GlueError`：
+管道上有 6 个 Zod 校验点（`strict: false` 可整体跳过），失败即收敛为 `GlueError`：
 
-| 校验点 | 归属接缝 | 校验对象 | 错误码 | HTTP |
+| 校验点 | 归属阶段 | 校验对象 | 错误码 | HTTP |
 | --- | --- | --- | --- | --- |
-| `in` | toGlue | 商品入参 vs `card.in` | `GLUE.SCHEMA.IN` | 400 |
-| `glue` | toGlue | 总线 `req` vs `card.glue` | `GLUE.SCHEMA.GLUE` | 502 |
-| `input` | bind | 源站入参 vs `source.input` | `GLUE.SCHEMA.INPUT` | 502 |
-| `request` | take | 源站请求 vs `source.request`（可选） | `GLUE.SCHEMA.REQUEST` | 502 |
-| `upstreamRes` | put | 源站原始响应 vs `source.upstreamRes` | `GLUE.SCHEMA.UPSTREAM_RES` | 502 |
-| `output` | put | 原子字段 vs `source.output` | `GLUE.SCHEMA.OUTPUT` | 502 |
-| `out` | fromGlue | 商品出参 vs `card.out` | `GLUE.SCHEMA.OUT` | 502 |
+| `in` | collect | 入站请求 vs `card.in` | `GLUE.SCHEMA.IN` | 400 |
+| `input` | invoke | 源站入参（IR 提取或显式）vs `source.input` | `GLUE.SCHEMA.INPUT` | 502 |
+| `request` | invoke | 源站请求 vs `source.request`（可选） | `GLUE.SCHEMA.REQUEST` | 502 |
+| `upstreamRes` | invoke | 源站原始响应 vs `source.upstreamRes` | `GLUE.SCHEMA.UPSTREAM_RES` | 502 |
+| `output` | invoke | 原子字段 vs `source.output` | `GLUE.SCHEMA.OUTPUT` | 502 |
+| `out` | respond | 商品出参 vs `card.out` | `GLUE.SCHEMA.OUT` | 502 |
+
+> IR 本身**没有**整体校验点：它是自由键值缓存，契约校验落在两端（`in`/`out`）与每次 `invoke` 的源站段（`input`/`output` 等）。seeds 的类型校验在 `buildRelay` 上线门一次性完成。
 
 统一错误模型 `GlueError`：任何一跳失败都收敛为它。字段 `code` / `message` / `retryable` / `status` / `seam` / `sourceId?` / `raw?`。
 
@@ -441,11 +400,12 @@ lastBody(src.mock);       // 断言请求体
 | `GLUE.TRANSPORT.NETWORK` | 502 | **是** | 源站网络错误 |
 | `GLUE.TRANSPORT.CANCELLED` | 499 | 否 | 请求被取消 |
 | `GLUE.BUSINESS.<CODE>` | 502 | 视 `retryableCodes` | 源站业务错误（`errorMap` 翻译后），含 `SOURCE_UNBOUND` / `UPSTREAM_STREAM_UNDECLARED` |
-| `GLUE.CARD.*` | 404 / 500 | 否 | 未注册的卡片（`NOT_FOUND`）；非 scripted 调用 invoke（`INVOKE_FORBIDDEN`）；invoke 未声明的源站（`SOURCE_NOT_DECLARED`） |
+| `GLUE.CARD.NOT_FOUND` | 404 | 否 | 未注册的业务卡片 |
+| `GLUE.CARD.SOURCE_NOT_REGISTERED` | 404 | 否 | `invoke` 了未注册的 API 卡片 |
 | `GLUE.UNKNOWN` | 500 | 否 | 未收敛的异常 |
 
 - `retryable` 是**重试 / 切换源站的唯一信号**；
-- `raw`（源站原始响应体）**只进日志/审计，永不透出**给商品侧（`toJSON()` 只含 `code` / `status` / `sourceId`）；
+- `raw`（源站原始响应体）只留在错误对象内供宿主消费，**永不透出**给商品侧（`toJSON()` 只含 `code` / `status` / `sourceId`）；
 - 声明期 / 注册期错误为 `RegistrationError`（带 `step` 定位）。
 
 ---
@@ -456,15 +416,14 @@ lastBody(src.mock);       // 断言请求体
 
 | 分类 | 导出 |
 | --- | --- |
-| 定义卡片 | `defineCard`、`defineSource`、`inject`、`redact` |
+| 定义卡片 | `defineCard`、`defineSource` |
 | 控制面 | `RelayController`、`noopLogger` |
 | 服务面 | `Relay` |
 | manifest | `ManifestSchema`、`parseManifest`、`readManifest` |
-| 总线 / 标记 | `Bus`、`relayMeta`、`scanGlueMeta` |
 | 源站 / 传输 | `SourceRegistry`、`defaultTransport`、`buildUrl`、`buildInit`、`MockSource` |
 | 流式 | `isReadableStream`、`sseEvents`、`parseSseJson` |
 | 错误 | `GlueError`、`RegistrationError` |
-| 类型 | `RelayCard`、`SourceCard`、`SourceCardRef`、`GlueCtx`、`UpstreamRequest`、`SourceBinding`、`ResolvedPolicy`、`InspectView`、`Manifest`、`CheckSeam`、`SseEvent` 等 |
+| 类型 | `RelayCard`、`SourceCard`、`CollectCtx`、`RespondCtx`、`UpstreamRequest`、`SourceBinding`、`ResolvedPolicy`、`InspectView`、`Manifest`、`CheckSeam`、`SseEvent` 等 |
 
 测试子入口 `omni-relay/testing`：`mockSource`、`lastBody`、`MockSource`，及类型 `MockedSource`、`MockResponse`、`MockResponder`。
 
@@ -473,28 +432,17 @@ lastBody(src.mock);       // 断言请求体
 | 方法 | 说明 |
 | --- | --- |
 | `registerSource(ref, binding)` | 逻辑 ref → 物理绑定（`baseURL` / `headers` / `auth` / `timeoutMs` / `fetch`） |
-| `registerSourceCard(sc, manifest?, opts?)` | 注册源站卡片到中心化注册表 |
-| `registerCard(card, manifest?, opts?)` | 注册商品卡片（执行交叉校验链 + 版本门禁） |
-| `registerCardFromManifest(path, loader?)` | Node 便捷入口：从 manifest 文件注册 |
-| `setRuntimeConfig(name, config)` | 注入 `inject` 字段值 |
-| `setPolicy(name, policy)` | 性能类策略覆盖（`timeoutMs` / `retry` / `strategy`） |
-| `buildRelay()` | 上线门：注入字段齐备后产出 `Relay` |
-| `deregisterCard(name)` / `deregisterSourceCard(name)` | 退役 |
-| `inspectCard(name)` / `inspectSourceCard(name)` | 字段级只读视图（管理界面 / 审计工具消费） |
+| `registerSourceCard(sc, manifest?, opts?)` | 注册 API 卡片到中心化注册表 |
+| `registerCard(card, manifest?, opts?)` | 注册业务卡片（执行交叉校验链 + 版本门禁） |
+| `registerCardFromManifest(path, loader?)` | Node 便捷入口：从 manifest 文件注册业务卡片 |
+| `registerSourceCardFromManifest(path, loader?)` | Node 便捷入口：从 manifest 文件注册 API 卡片 |
+| `setRuntimeConfig(name, config)` | 注入 `seeds` 键值（注册期静态） |
+| `setPolicy(name, policy)` | 性能类策略覆盖（`timeoutMs` / `retry`） |
+| `buildRelay()` | 上线门：seeds 存在 + 类型齐备后产出 `Relay` |
+| `deregisterCard(name)` / `deregisterSourceCard(name)` | 卸载 |
+| `inspectCard(name)` / `inspectSourceCard(name)` | 字段级只读视图（管理界面消费） |
 | `listCards()` / `listSourceCards()` / `listBindings()` | 清单视图（`listBindings` 不含认证材料，仅 `hasAuth` 布尔） |
-| `getAuditLog()` | 控制面操作审计（谁在何时注册 / 变更了什么） |
-
----
-
-## 设计原则
-
-- **卡片是一等公民**：每个能力（源站对接 / 商品 API）都是可独立声明、注册、版本化、退役的卡片。
-- **声明期自洽**：`defineCard` / `defineSource` 就地校验，「对不上」在声明期报错，不留到运行时。
-- **契约双事实源交叉校验**：schema 是类型唯一事实，manifest 是部署唯一事实，注册期交叉校验防漂移。
-- **总线是介入面**：框架主权（审计 / 注入 / 屏蔽）住在总线与钩子上，卡片不可覆盖 —— 治理与业务解耦。
-- **控制面 / 服务面分离**：控制面治理、服务面执行，原子切换不断服，in-flight 请求持旧引用跑完。
-- **对接与消费解耦**：源站卡片不知道谁消费，商品卡片不接触源站细节，经中心化注册表按名引用。
-- **错误收敛**：任何一跳失败收敛为 `GlueError`，`retryable` 是重试/切换唯一信号，`raw` 永不外泄。
+| `onControlEvent`（构造选项） | 控制面治理事件回调；条目格式与去向由宿主决定，框架不留存 |
 
 ---
 
@@ -504,14 +452,11 @@ lastBody(src.mock);       // 断言请求体
 src/
 ├─ index.ts            公共出口
 ├─ core/
-│  ├─ types.ts         全部类型契约
-│  ├─ card.ts          defineCard（商品卡片声明期校验）
-│  ├─ sourceCard.ts    defineSource（源站卡片声明期校验）
-│  ├─ markers.ts       inject / redact 字段标记
-│  ├─ bus.ts           中介总线（三分区 + 脱敏摘要）
-│  ├─ pipeline.ts      管道执行序（per-source 段、重试、错误映射）
-│  ├─ strategy.ts      多源站策略（firstSuccess / race / all）
-│  ├─ controller.ts    控制面（注册 / 绑定 / 注入 / 策略 / 审计 / 版本门禁）
+│  ├─ types.ts         全部类型契约（CollectCtx / RespondCtx / RawCardDef …）
+│  ├─ card.ts          defineCard（业务卡片声明期校验）
+│  ├─ sourceCard.ts    defineSource（API 卡片声明期校验）
+│  ├─ pipeline.ts      管道执行序（collect / respond / invoke 内核、重试、错误映射）
+│  ├─ controller.ts    控制面（注册 / 绑定 / seeds / 策略 / 治理事件 / 版本门禁）
 │  ├─ relay.ts         服务面（handle / toFetchHandler）
 │  ├─ manifest.ts      manifest schema 与读取
 │  ├─ errors.ts        GlueError / RegistrationError 与错误码

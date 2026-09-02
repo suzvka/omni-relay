@@ -6,7 +6,6 @@ describe('glue error', () => {
     expect(GlueError.schema('in', 'bad').status).toBe(400);
     expect(GlueError.schema('in', 'bad').code).toBe('GLUE.SCHEMA.IN');
     const codes: Record<string, string> = {
-      glue: 'GLUE.SCHEMA.GLUE',
       input: 'GLUE.SCHEMA.INPUT',
       request: 'GLUE.SCHEMA.REQUEST',
       upstreamRes: 'GLUE.SCHEMA.UPSTREAM_RES',

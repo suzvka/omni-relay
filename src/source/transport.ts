@@ -74,7 +74,7 @@ async function readBody(res: Response): Promise<unknown> {
   try {
     if (contentType.includes('json')) return await res.json();
     const text = await res.text();
-    if (contentType.includes('json') || (text && (text.startsWith('{') || text.startsWith('[')))) {
+    if (text && (text.startsWith('{') || text.startsWith('['))) {
       try {
         return JSON.parse(text);
       } catch {

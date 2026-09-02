@@ -3,10 +3,10 @@ import { RegistrationError } from './errors';
 import type { CardMeta, RawSourceCardDef, SourceCard } from './types';
 
 /**
- * 定义一张源站卡片(对接侧插件):封装"连接一个源站 + 清洗为原子字段"。
+ * 定义一张源站卡片(API 卡片 / 对接侧插件):封装"连接一个源站 + 清洗为原子字段"。
  * 声明期即做自洽校验,"对不上"在这里就地报错。
- * 对接者只声明能力契约(需要什么入参、能提供哪些原子字段),不知道谁消费;
- * 业务卡片经 SourceCardRef 引用,经中心化注册表注册后方可使用。
+ * 对接者只声明能力契约(input:invoke 从 IR 读取的键;output:写回 IR 的原子字段),不知道谁消费;
+ * 业务卡片 collect 经 ctx.invoke 按名调用,须先经中心化注册表 registerSourceCard 注册。
  */
 export function defineSource<
   TIn extends z.ZodType,

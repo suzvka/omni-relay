@@ -1,11 +1,10 @@
 import type { Seam } from './types';
 
 /** 请求期校验点(对应错误码 GLUE.SCHEMA.<SEAM>) */
-export type CheckSeam = 'in' | 'glue' | 'input' | 'request' | 'upstreamRes' | 'output' | 'out';
+export type CheckSeam = 'in' | 'input' | 'request' | 'upstreamRes' | 'output' | 'out';
 
 const CHECK_STATUS: Record<CheckSeam, number> = {
   in: 400,
-  glue: 502,
   input: 502,
   request: 502,
   upstreamRes: 502,
@@ -15,7 +14,6 @@ const CHECK_STATUS: Record<CheckSeam, number> = {
 
 const CHECK_CODE: Record<CheckSeam, string> = {
   in: 'GLUE.SCHEMA.IN',
-  glue: 'GLUE.SCHEMA.GLUE',
   input: 'GLUE.SCHEMA.INPUT',
   request: 'GLUE.SCHEMA.REQUEST',
   upstreamRes: 'GLUE.SCHEMA.UPSTREAM_RES',
@@ -23,15 +21,14 @@ const CHECK_CODE: Record<CheckSeam, string> = {
   out: 'GLUE.SCHEMA.OUT',
 };
 
-/** 校验点归属的管道接缝 */
+/** 校验点归属的管道阶段 */
 const SEAM_OF_CHECK: Record<CheckSeam, Seam> = {
-  in: 'toGlue',
-  glue: 'toGlue',
-  input: 'bind',
-  request: 'take',
-  upstreamRes: 'put',
-  output: 'put',
-  out: 'fromGlue',
+  in: 'collect',
+  input: 'invoke',
+  request: 'invoke',
+  upstreamRes: 'invoke',
+  output: 'invoke',
+  out: 'respond',
 };
 
 export interface GlueErrorInit {
@@ -99,7 +96,7 @@ export class GlueError extends Error {
         message: conf.message,
         retryable: conf.retryable,
         status: conf.status,
-        seam: 'take',
+        seam: 'invoke',
         sourceId,
       },
       { cause },
@@ -117,7 +114,7 @@ export class GlueError extends Error {
       message,
       retryable: opts.retryable ?? false,
       status: opts.status ?? 502,
-      seam: 'put',
+      seam: 'invoke',
       sourceId: opts.sourceId,
       raw: opts.raw,
     });
