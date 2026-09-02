@@ -76,7 +76,7 @@ omni-relay 的回答是**卡片化 + 总线介入 + 双平面分离**：
 toGlue  →  合成 inject 字段  →  ▸ 校验点 glue  →  bus.req
   │        [钩子 onBusReq、toGlue 中间件：审计 / 注入 / 屏蔽]
   ▼
-per-source 段（策略：firstSuccess / race / all）
+per-source 段（策略：firstSuccess / race / all / scripted）
   bind → ▸input → take → ▸request → transport（超时 / 重试 / 业务错误映射）
        → ▸upstreamRes → put → ▸output → bus.res.<id>
   │        [钩子 onBusRes、bind / take / put 中间件]
@@ -246,6 +246,7 @@ glue: z.object({
 | `firstSuccess`（默认） | 顺序执行；**仅 `retryable` 错误**切换下一个源站，业务性失败直接抛出 |
 | `race` | 并发执行，首个成功者胜出（全部失败时抛聚合错误的第一个） |
 | `all` | 全部执行（聚合场景，`fromGlue` 合并各命名空间） |
+| `scripted` | 源站段**不自动执行**：执行权在卡片编排逻辑，经 `ctx.invoke` 按需、按序、可并发驱动（见下） |
 
 重试由 `RetryPolicy { max, backoff: 'fixed' | 'expo' }` 控制。`retryable` 是重试/切换源站的**唯一信号**：传输层 `TIMEOUT` / `NETWORK` 天然可重试，业务错误需命中 `errorMap.retryableCodes` 才可重试。
 
@@ -258,6 +259,39 @@ controller.setPolicy('product.detail', {
 ```
 
 解析优先级：`setPolicy` 覆盖 > `manifest.suggests` > 框架默认（`timeoutMs` 兜底为 `defaultTimeoutMs`，缺省 10s；`retry` 缺省 `{ max: 0 }`；`strategy` 缺省 `firstSuccess`）。
+
+#### scripted 与编排原语 ctx.invoke
+
+`scripted` 策略把 per-source 段的执行权交给**卡片自带的编排逻辑**（`middlewares`）：`sources` 照常声明（保住 manifest 交叉校验、`inspectCard` 依赖边视图与绑定就绪门禁），但不自动运行；编排代码经 `ctx.invoke(sourceId, input?)` 按需、按序、可并发地驱动源站段。
+
+```ts
+defineCard({
+  // ...
+  sources: [
+    { source: tokenSc, id: 'token', bind: (g) => ({ productId: g.productId }) },
+    { source: deductSc, id: 'deduct', bind: (g) => ({ /* ... */ }) },
+  ],
+  middlewares: [{
+    seam: 'fromGlue',
+    run: async (ctx, next) => {
+      const token = await ctx.invoke('token');            // 省略 input → 走 bind(glue)
+      const req = ctx.bus.req as { accountId: string; points: number };
+      await ctx.invoke('deduct', {                        // 显式 input → 跳过 bind,仍过 input 校验点
+        token: (token as { value: string }).value,        // 上一步产物可直读
+        accountId: req.accountId, points: req.points,
+      });
+      await next();                                       // fromGlue 从 res.token / res.deduct 读 IR
+    },
+  }],
+  // ...
+});
+controller.setPolicy('orchestrate.deduct', { strategy: 'scripted' });
+```
+
+- 每次 `invoke` 都走**完整源站段**（take / transport / put / 各校验点），产物写入 `res.<id>`（IR），`onBusRes` 钩子逐步触发，`digest()` 全量可见——治理主权不因编排旁路；
+- 仅 `scripted` 策略下可用，否则 `GLUE.CARD.INVOKE_FORBIDDEN`；未声明的 id → `GLUE.CARD.SOURCE_NOT_DECLARED`；
+- 多源容灾不再自动：降级由编排逻辑 `try/catch` 决定；`timeoutMs` / `retry` / `errorMap` 仍按源站卡片逐次生效；
+- 并发安全：per-source 段隔离字段各持浅拷贝，`Promise.all` 多路 `invoke` 互不踩（同一 `id` 重复 invoke 为 last-write-wins）。
 
 ### 流式透传（SSE）
 
@@ -343,7 +377,7 @@ defineCard({
 });
 ```
 
-`GlueCtx` 贯穿一次执行，含 `card` / `bus` / `state` / `log` / `signal` / `timing` / `meta`，以及 per-source 段隔离的 `sourceId` / `sourceInput` / `upstream` / `raw`。
+`GlueCtx` 贯穿一次执行，含 `card` / `bus` / `state` / `log` / `signal` / `timing` / `meta` / `invoke`（编排原语，scripted 专用），以及 per-source 段隔离的 `sourceId` / `sourceInput` / `upstream` / `raw`。
 
 ### 暴露为 fetch handler
 
@@ -407,7 +441,7 @@ lastBody(src.mock);       // 断言请求体
 | `GLUE.TRANSPORT.NETWORK` | 502 | **是** | 源站网络错误 |
 | `GLUE.TRANSPORT.CANCELLED` | 499 | 否 | 请求被取消 |
 | `GLUE.BUSINESS.<CODE>` | 502 | 视 `retryableCodes` | 源站业务错误（`errorMap` 翻译后），含 `SOURCE_UNBOUND` / `UPSTREAM_STREAM_UNDECLARED` |
-| `GLUE.CARD.NOT_FOUND` | 404 | 否 | 未注册的卡片 |
+| `GLUE.CARD.*` | 404 / 500 | 否 | 未注册的卡片（`NOT_FOUND`）；非 scripted 调用 invoke（`INVOKE_FORBIDDEN`）；invoke 未声明的源站（`SOURCE_NOT_DECLARED`） |
 | `GLUE.UNKNOWN` | 500 | 否 | 未收敛的异常 |
 
 - `retryable` 是**重试 / 切换源站的唯一信号**；

@@ -97,6 +97,46 @@ export async function runCard(
   const sources = def.sources as readonly SourceCardRef<any, any, any>[];
 
   const bus = new Bus(card.redactKeys);
+  const sourceById = new Map(sources.map((s) => [s.id as string, s]));
+  const scripted = entry.policy.strategy === 'scripted';
+
+  /** 编排原语内核:守卫 → 执行一次源站段 → 返回 IR 产物 */
+  const runInvokedSource = async (
+    sourceId: string,
+    input: unknown,
+  ): Promise<unknown> => {
+    if (!scripted) {
+      throw new GlueError({
+        code: 'GLUE.CARD.INVOKE_FORBIDDEN',
+        message: `ctx.invoke 仅在 scripted 策略下可用(卡片 ${card.meta.name} 当前为 ${entry.policy.strategy})`,
+        retryable: false,
+        status: 500,
+        seam: 'control',
+      });
+    }
+    const src = sourceById.get(sourceId);
+    if (!src) {
+      throw new GlueError({
+        code: 'GLUE.CARD.SOURCE_NOT_DECLARED',
+        message: `卡片 ${card.meta.name} 未声明源站 ${sourceId}(须先在 sources 中声明)`,
+        retryable: false,
+        status: 500,
+        seam: 'control',
+        sourceId,
+      });
+    }
+    // per-source 隔离(并发安全):sourceInput/upstream/raw 各持浅拷贝,res 按命名空间写入
+    await runSource(
+      deps,
+      entry,
+      { ...ctx, sourceId },
+      src,
+      strict,
+      input !== undefined ? { input } : undefined,
+    );
+    return (ctx.bus.res as Record<string, unknown>)[sourceId];
+  };
+
   const ctx: GlueCtx = {
     card: card.meta,
     bus,
@@ -105,6 +145,7 @@ export async function runCard(
     signal: opts.signal ?? new AbortController().signal,
     timing: {},
     meta: opts.meta ?? {},
+    invoke: (sourceId, input) => runInvokedSource(sourceId, input),
   };
 
   try {
@@ -124,11 +165,13 @@ export async function runCard(
     });
     ctx.timing['toGlue'] = now() - tGlue;
 
-    // per-source 段(策略编排)
+    // per-source 段(策略编排;scripted = 执行权在卡片,经 ctx.invoke 按需驱动,不自动执行)
     const tSrc = now();
-    await runWithStrategy(entry.policy.strategy, sources, (src) =>
-      runSource(deps, entry, ctx, src, strict),
-    );
+    if (entry.policy.strategy !== 'scripted') {
+      await runWithStrategy(entry.policy.strategy, sources, (src) =>
+        runSource(deps, entry, ctx, src, strict),
+      );
+    }
     ctx.timing['sources'] = now() - tSrc;
 
     // fromGlue 接缝
@@ -154,13 +197,15 @@ export async function runCard(
 }
 
 /** 单源站段:bind → input校验 → take → request校验 → transport(重试+业务映射)
- *  → upstreamRes校验 → put → output校验 → [钩子res] → writeRes */
+ *  → upstreamRes校验 → put → output校验 → [钩子res] → writeRes
+ *  given 给定时跳过 bind 核心(invoke 显式传参场景;bind 接缝中间件仍包裹,input 校验点照跑) */
 async function runSource(
   deps: PipelineDeps,
   entry: RegisteredCard,
   ctx: GlueCtx,
   src: SourceCardRef<any, any, any>,
   strict: boolean,
+  given?: { input: unknown },
 ): Promise<void> {
   const srcId = src.id;
   const srcDef = src.source.def;
@@ -173,10 +218,10 @@ async function runSource(
     });
   }
 
-  // bind 接缝(业务总线 → 源站入参)
+  // bind 接缝(业务总线 → 源站入参;invoke 显式传参时跳过核心)
   const t0 = now();
   await compose(seamMiddlewares(entry.card.def, 'bind'))(srcCtx, async () => {
-    const sInput = await src.bind(srcCtx.bus.req as never);
+    const sInput = given ? given.input : await src.bind(srcCtx.bus.req as never);
     srcCtx.sourceInput = strict ? checkAt('input', srcDef.input, sInput, srcId) : sInput;
   });
   ctx.timing[`${srcId}.bind`] = now() - t0;

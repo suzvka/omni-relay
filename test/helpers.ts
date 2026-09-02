@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { defineCard, defineSource, inject, redact, RelayController } from '../src/index';
 import { mockSource } from '../src/testing';
-import type { ErrorMapDef, RelayCard, SourceCard } from '../src/index';
+import type { ErrorMapDef, MultiSourceStrategy, RelayCard, SourceCard } from '../src/index';
 import type { MockedSource } from '../src/testing';
 
 /** 标准源站卡片(与示例源站卡片同构,便于各测试复用) */
@@ -110,7 +110,7 @@ export function setup(
     card?: RelayCard;
     mockBody?: unknown;
     sources?: MockedSource[];
-    policy?: { timeoutMs?: number; retry?: { max: number; backoff: 'fixed' | 'expo' }; strategy?: 'firstSuccess' | 'race' | 'all' };
+    policy?: { timeoutMs?: number; retry?: { max: number; backoff: 'fixed' | 'expo' }; strategy?: MultiSourceStrategy };
   } = {},
 ) {
   const card = opts.card ?? makeCard();

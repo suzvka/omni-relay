@@ -23,7 +23,7 @@ export const ManifestSchema = z.object({
           backoff: z.enum(['fixed', 'expo']).default('expo'),
         })
         .optional(),
-      strategy: z.enum(['firstSuccess', 'race', 'all']).optional(),
+      strategy: z.enum(['firstSuccess', 'race', 'all', 'scripted']).optional(),
     })
     .optional(),
 });

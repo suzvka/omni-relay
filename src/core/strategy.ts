@@ -1,13 +1,14 @@
 import { GlueError } from './errors';
+import type { MultiSourceStrategy } from './types';
 
 /**
- * 多源站编排:
+ * 多源站编排(自动策略;scripted 由 runCard 守卫,不进入此函数):
  * - firstSuccess(默认):顺序执行;仅 retryable 错误切换下一个源站,业务性失败直接抛出;
  * - race:并发执行,首个成功者胜出(失败聚合后抛第一个错误);
  * - all:全部执行(聚合场景)。
  */
 export async function runWithStrategy<T>(
-  strategy: 'firstSuccess' | 'race' | 'all',
+  strategy: Exclude<MultiSourceStrategy, 'scripted'>,
   sources: readonly T[],
   runner: (source: T) => Promise<void>,
 ): Promise<void> {

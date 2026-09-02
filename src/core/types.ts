@@ -55,6 +55,13 @@ export interface GlueCtx {
   timing: Record<string, number>;
   /** 请求级透传元数据(trace id 等),不进总线 */
   meta: Record<string, unknown>;
+  /**
+   * 编排原语(仅 scripted 策略可用):执行一次源站段,产物写入 res.<sourceId> 并返回。
+   * - invoke(id):走该 source 声明的 bind(glue);
+   * - invoke(id, input):跳过 bind,用显式 input(仍过 input 校验点);
+   * - 每次执行都经过完整管道(take/transport/put/校验点/onBusRes 钩子)。
+   */
+  invoke: (sourceId: string, input?: unknown) => Promise<unknown>;
   // ---- 以下字段为 per-source 段隔离(race/并发时各源站持有浅拷贝) ----
   sourceId?: string;
   /** bind 产物(源站入参),经 input 校验点校验 */
@@ -236,7 +243,12 @@ export interface RelayCard<TDef extends RawCardDef<any, any, any> = RawCardDef<a
 // 策略与配置
 // ---------------------------------------------------------------------------
 
-export type MultiSourceStrategy = 'firstSuccess' | 'race' | 'all';
+/**
+ * 多源站策略:
+ * - firstSuccess/race/all:框架自动编排(runWithStrategy);
+ * - scripted:源站段不自动执行,执行权在卡片编排逻辑(经 GlueCtx.invoke 按需驱动)。
+ */
+export type MultiSourceStrategy = 'firstSuccess' | 'race' | 'all' | 'scripted';
 
 export interface RetryPolicy {
   max: number;
