@@ -2,7 +2,6 @@ import { GlueError } from './errors';
 import { checkAt } from './validate';
 import { isReadableStream } from './stream';
 import type { Manifest } from './manifest';
-import type { SourceRegistry } from '../source/registry';
 import { defaultTransport } from '../source/transport';
 import type {
   CollectCtx,
@@ -14,6 +13,8 @@ import type {
   ResolvedPolicy,
   SourceBinding,
   SourceCard,
+  SourceResolver,
+  TransportFn,
   TransportResult,
   UpstreamRequest,
 } from './types';
@@ -32,9 +33,12 @@ export interface SourceCardEntry {
 }
 
 export interface PipelineDeps {
-  registry: SourceRegistry;
+  /** 源站解析端口:仅依赖 ref → 物理绑定 的最小查询面 */
+  registry: SourceResolver;
   /** 源站卡片注册表提供者:invoke 按名解析任意已注册 API 卡片 */
   sourceCards: () => ReadonlyMap<string, SourceCardEntry>;
+  /** 传输实现注入点(缺省 defaultTransport);重试仍在 pipeline 层与 errorMap 共享循环 */
+  transport?: TransportFn;
   hooks?: ControllerHooks;
   logger: Logger;
   defaultTimeoutMs: number;
@@ -188,11 +192,13 @@ async function fetchMapped(
   const backoff = policy.retry?.backoff ?? 'expo';
   const timeoutMs = policy.timeoutMs ?? binding.timeoutMs ?? deps.defaultTimeoutMs;
 
+  const transport = deps.transport ?? defaultTransport;
+
   let attempt = 0;
   for (;;) {
     let result: TransportResult;
     try {
-      result = await defaultTransport(binding, ureq, { signal, timeoutMs });
+      result = await transport(binding, ureq, { signal, timeoutMs });
     } catch (e) {
       if (e instanceof GlueError && e.retryable && attempt < maxRetries) {
         await sleep(backoff === 'expo' ? 200 * 2 ** attempt : 500);

@@ -87,6 +87,25 @@ export interface TransportResult {
   stream?: boolean;
 }
 
+/** 传输原语:一次"物理绑定 + 已构建请求"到传输结果的执行;可经 RelayControllerOptions 注入,缺省 defaultTransport */
+export type TransportFn = (
+  binding: SourceBinding,
+  req: UpstreamRequest,
+  opts: { signal?: AbortSignal; timeoutMs?: number },
+) => Promise<TransportResult>;
+
+/** 源站解析最小端口:Pipeline 只依赖这一个查询面 */
+export interface SourceResolver {
+  resolve(ref: string): SourceBinding | undefined;
+}
+
+/** 控制面注册表端口:SourceRegistry 的结构化视图,宿主可自定义实现(持久化/多租户等) */
+export interface SourceRegistryPort extends SourceResolver {
+  register(ref: string, binding: SourceBinding): unknown;
+  has(ref: string): boolean;
+  list(): ReadonlyMap<string, SourceBinding>;
+}
+
 // ---------------------------------------------------------------------------
 // 卡片
 // ---------------------------------------------------------------------------
@@ -292,4 +311,8 @@ export interface RelayControllerOptions {
   defaultTimeoutMs?: number;
   /** 宿主治理事件回调(注册/卸载/配置/策略变更时触发);未配置则框架不留存任何条目 */
   onControlEvent?: (event: ControlEvent) => void;
+  /** 自定义传输实现(缺省 defaultTransport):mock/观测/换协议实现均走此注入点 */
+  transport?: TransportFn;
+  /** 自定义源站注册表(缺省内置 SourceRegistry) */
+  registry?: SourceRegistryPort;
 }

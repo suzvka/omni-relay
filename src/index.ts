@@ -16,8 +16,9 @@ export {
   buildUrl,
   defaultTransport,
 } from './source/transport';
-export type { MockResponse, MockResponder, TransportFn } from './source/transport';
+export type { MockResponse, MockResponder } from './source/transport';
 export { SourceRegistry } from './source/registry';
+export type { TransportFn } from './core/types';
 export { sseEvents, parseSseJson } from './source/sse';
 export type { SseEvent } from './source/sse';
 export * from './core/types';

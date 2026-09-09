@@ -17,7 +17,10 @@ import type {
   RelayCard,
   RelayControllerOptions,
   ResolvedPolicy,
+  SourceBinding,
   SourceCard,
+  SourceRegistryPort,
+  TransportFn,
 } from './types';
 
 export const noopLogger: Logger = {
@@ -41,7 +44,9 @@ interface CatalogEntry extends RegisteredCard {
  * (opts.rollback)方可重发旧版制品原子替换(无下线窗口)。`deregisterCard` = 卸载。
  */
 export class RelayController {
-  readonly #registry = new SourceRegistry();
+  readonly #registry: SourceRegistryPort;
+  /** 传输实现注入点(undefined → 缺省 defaultTransport,经 buildRelay 传入 pipeline) */
+  readonly #transport: TransportFn | undefined;
   /** 服务目录:当前服务版本(name → entry);制品历史由宿主制品层留存,框架不留 */
   readonly #cards = new Map<string, CatalogEntry>();
   readonly #sourceCards = new Map<string, SourceCardEntry>();
@@ -57,6 +62,8 @@ export class RelayController {
     this.#onControlEvent = opts.onControlEvent;
     this.#logger = opts.logger ?? noopLogger;
     this.#defaultTimeoutMs = opts.defaultTimeoutMs ?? 10_000;
+    this.#registry = opts.registry ?? new SourceRegistry();
+    this.#transport = opts.transport;
   }
 
   // -------------------------------------------------------------------------
@@ -64,7 +71,7 @@ export class RelayController {
   // -------------------------------------------------------------------------
 
   /** 专用接口:逻辑 ref → 物理绑定(地址/认证/超时) */
-  registerSource(ref: string, binding: Parameters<SourceRegistry['register']>[1]): this {
+  registerSource(ref: string, binding: SourceBinding): this {
     this.#registry.register(ref, binding);
     this.#record('registerSource', ref, { baseURL: binding.baseURL, timeoutMs: binding.timeoutMs });
     return this;
@@ -331,6 +338,7 @@ export class RelayController {
     const deps: PipelineDeps = {
       registry: this.#registry,
       sourceCards: () => this.#sourceCards,
+      transport: this.#transport,
       hooks: this.#hooks,
       logger: this.#logger,
       defaultTimeoutMs: this.#defaultTimeoutMs,

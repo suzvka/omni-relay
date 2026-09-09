@@ -119,6 +119,7 @@ const src = mockSource('jd/items/detail', { body: { item_name: 'X', price: 9.9, 
 | IR 键值缓存 | 贯穿一次执行的公共黑板：seeds 注入、invoke 写回、宿主规则介入面 |
 | 契约校验 | 管道 6 个 Zod 校验点，任何一跳失败都收敛为统一 `GlueError`，raw 永不透出 |
 | 重试与容灾 | `timeoutMs` / `retry` 策略覆盖，`retryable` 驱动重试与源站切换 |
+| 组合根注入 | `RelayControllerOptions` 可替换 transport / registry；Pipeline 只依赖 `SourceResolver` 最小端口 |
 | 流式透传 | SSE 声明式直通，未声明即拒绝，失败自动 `cancel` 防悬挂 |
 | 版本治理 | manifest 交叉校验、版本门禁拒绝旧版误发、原子切换不断服 |
 | 管理视图 | `inspectCard` / `listCards` / 治理事件回调，认证材料只留 `hasAuth` 布尔 |

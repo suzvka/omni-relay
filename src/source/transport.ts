@@ -3,15 +3,12 @@ import type {
   AuthInput,
   FetchLike,
   SourceBinding,
+  TransportFn,
   TransportResult,
   UpstreamRequest,
 } from '../core/types';
 
-export type TransportFn = (
-  binding: SourceBinding,
-  req: UpstreamRequest,
-  opts: { signal?: AbortSignal; timeoutMs?: number },
-) => Promise<TransportResult>;
+export type { TransportFn } from '../core/types';
 
 /** 组装最终 URL:baseURL + path(:param 替换)+ query(过滤 undefined) */
 export function buildUrl(binding: SourceBinding, req: UpstreamRequest): string {
