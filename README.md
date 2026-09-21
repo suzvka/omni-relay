@@ -125,6 +125,28 @@ const src = mockSource('jd/items/detail', { body: { item_name: 'X', price: 9.9, 
 | 管理视图 | `inspectCard` / `listCards` / 治理事件回调，认证材料只留 `hasAuth` 布尔 |
 | 测试子入口 | `omni-relay/testing`：mock 传输、单值/序列/函数回放、SSE 回放 |
 
+## 📖 文档生成（omni-relay/docgen）
+
+卡片已经带着 Zod 契约——docgen 把它反射成接口描述的 **Markdown 字符串**，省去手写请求/响应字段表的漂移。它**只产文本**：不写盘、不绑定任何文档框架，页面装配与渲染交给宿主。
+
+```ts
+import { renderEndpoint } from 'omni-relay/docgen';
+
+const md = renderEndpoint({
+  method: 'POST',
+  path: '/api/credits/topups',
+  auth: 'session',            // 宿主自定义标签,docgen 只原样打印
+  card: creditTopupCreateCard, // 自动反射卡片 in/out 作为请求/响应契约
+  description: '购买自营积分商品，创建订单。',
+  responseExample: { order_no: 'A1', status: 'PENDING' },
+  hideFields: ['oldPassword'], // 敏感叶子:表中标注、示例中打码
+});
+```
+
+字段级中文说明取自 `.describe()`、示例取自 `.meta({ examples })`（经 `z.toJSONSchema` 原生透出）；HTTP 方法/路径、鉴权、响应信封等框架不认识的横切信息由宿主随 spec 传入。还提供 `schemaToFields` / `renderFieldTable` / `renderJsonExample` / `renderEndpoints` 供宿主自由组装整页。
+
+> 渲染是宿主职责：把 `md` 拼进 Nextra/MDX 页面、写进 `content/` 由各项目自己的脚本完成。
+
 ## 📚 深入了解
 
 - [examples/sku-detail](./examples/sku-detail) —— 完整可运行的端到端示例
