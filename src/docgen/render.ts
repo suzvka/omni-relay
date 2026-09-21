@@ -1,6 +1,14 @@
 import type * as z from 'zod';
+import type { RelayCard } from '../core/types';
 import { schemaToFields } from './fields';
-import type { EndpointDoc, FieldDoc, FieldTableOptions, RenderOptions } from './types';
+import type {
+  CardDoc,
+  EndpointDoc,
+  EndpointFacts,
+  FieldDoc,
+  FieldTableOptions,
+  RenderOptions,
+} from './types';
 
 /** 从卡片产物鸭子类型取请求/响应 schema:业务卡 in/out,源站卡 input/output */
 function cardSchema(card: unknown, kind: 'request' | 'response'): z.ZodType | undefined {
@@ -110,6 +118,8 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
   const blocks: string[] = [];
   blocks.push(heading(level, title));
 
+  if (spec.signature) blocks.push(spec.signature);
+
   // 请求:方式/端点/鉴权 表
   const withAuth = !!spec.auth;
   const reqHeader = withAuth
@@ -139,6 +149,10 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
     requestSection.push('');
     requestSection.push(renderJsonExample(spec.requestExample, { hideFields }));
   }
+  if (spec.requestNotes) {
+    requestSection.push('');
+    requestSection.push(spec.requestNotes);
+  }
   blocks.push(requestSection.join('\n'));
 
   // 响应
@@ -158,6 +172,10 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
     if (responseSection.length > 1) responseSection.push('');
     if (!resSchema) responseSection.push(`**成功响应 (${successStatus})：**`, '');
     responseSection.push(renderJsonExample(spec.responseExample, { hideFields }));
+  }
+  if (spec.responseNotes) {
+    responseSection.push('');
+    responseSection.push(spec.responseNotes);
   }
   blocks.push(responseSection.join('\n'));
 
@@ -179,4 +197,53 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
 /** 多个端点顺序拼接(以空行分隔) */
 export function renderEndpoints(specs: EndpointDoc[], opts: RenderOptions = {}): string {
   return specs.map((s) => renderEndpoint(s, opts)).join('\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// 卡片驱动:doc 是卡片上的"散文";端点事实由宿主发布面注册表提供
+// ---------------------------------------------------------------------------
+
+/** 取卡片上作者填写的散文 doc(未填返回 undefined) */
+export function cardDocOf(card: unknown): CardDoc | undefined {
+  const doc = (card as { def?: { doc?: unknown } } | undefined)?.def?.doc;
+  return doc && typeof doc === 'object' ? (doc as CardDoc) : undefined;
+}
+
+/** 卡片是否带散文 doc */
+export function hasCardDoc(card: unknown): boolean {
+  return cardDocOf(card) !== undefined;
+}
+
+/**
+ * 把"卡片(契约 + 散文)"与宿主给的端点事实合成 renderEndpoint 所需的 EndpointDoc。
+ * 端点事实(method/path/title/auth)来自宿主的发布面注册表(如 surface),docgen 不推断;
+ * 字段表由 card 的 in/out 反射;散文由 card.doc 提供。
+ */
+export function endpointDocWithCard(card: RelayCard, facts: EndpointFacts): EndpointDoc {
+  const doc = cardDocOf(card) ?? {};
+  return {
+    method: facts.method,
+    path: facts.path,
+    title: facts.title,
+    auth: facts.auth,
+    card,
+    signature: doc.signature,
+    description: doc.description,
+    requestNotes: doc.requestNotes,
+    responseNotes: doc.responseNotes,
+    requestExample: doc.requestExample,
+    responseExample: doc.responseExample,
+    errors: doc.errors,
+    notes: doc.notes,
+    hideFields: doc.hideFields,
+  };
+}
+
+/** 渲染单张卡片(契约 + 散文 + 端点事实) → 一段 Markdown */
+export function renderCardDoc(
+  card: RelayCard,
+  facts: EndpointFacts,
+  opts: RenderOptions = {},
+): string {
+  return renderEndpoint(endpointDocWithCard(card, facts), opts);
 }

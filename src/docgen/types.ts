@@ -71,6 +71,12 @@ export interface EndpointDoc {
   notes?: string[];
   /** 敏感字段的叶子名:表中打码标注,示例中值替换为 `***` */
   hideFields?: string[];
+  /** 端点签名一句话(标题下方的短介绍,可选) */
+  signature?: string;
+  /** 请求参数补充释义(端点级自由段落;字段级仍走 `.describe()`,不在此重复) */
+  requestNotes?: string;
+  /** 返回值补充释义(端点级自由段落) */
+  responseNotes?: string;
 }
 
 /** renderEndpoint / renderEndpoints 的选项 */
@@ -81,4 +87,38 @@ export interface RenderOptions {
   headingLevel?: number;
   /** 字段表选项,请求/响应共用 */
   fieldTable?: FieldTableOptions;
+}
+
+/**
+ * 卡片作者填写的**端点散文**契约(挂在 `card.doc`,框架不解释、docgen 消费)。
+ *
+ * 全部可选:未填的字段 → 生成文档时对应段落不出现。
+ * 边界:端点**事实**(method/path/分组/可见性/文档落点)属宿主的发布面注册表(如 surface),
+ * 不在此重复;字段级释义走 Zod `.describe()`/`.meta()`，也不在此重复。
+ */
+export interface CardDoc {
+  /** 端点签名一句话介绍 */
+  signature?: string;
+  /** 端点详细说明段落 */
+  description?: string;
+  /** 请求参数补充释义(端点级自由段落) */
+  requestNotes?: string;
+  /** 返回值补充释义(端点级自由段落) */
+  responseNotes?: string;
+  requestExample?: unknown;
+  responseExample?: unknown;
+  errors?: ErrorRow[];
+  notes?: string[];
+  hideFields?: string[];
+}
+
+/**
+ * 端点事实(docgen 不推断,由宿主发布面注册表提供):方法/路径/标题/鉴权标签。
+ * 与卡片(契约 + 散文)一起合成 `EndpointDoc`。
+ */
+export interface EndpointFacts {
+  method: string;
+  path: string;
+  title?: string;
+  auth?: string;
 }

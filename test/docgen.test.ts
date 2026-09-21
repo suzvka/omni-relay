@@ -7,6 +7,10 @@ import {
   renderFieldTable,
   renderJsonExample,
   schemaToFields,
+  cardDocOf,
+  hasCardDoc,
+  endpointDocWithCard,
+  renderCardDoc,
 } from '../src/docgen';
 
 describe('schemaToFields', () => {
@@ -143,5 +147,80 @@ describe('renderEndpoint', () => {
     const md = renderEndpoints([one, two]);
     expect(md).toContain('## A');
     expect(md).toContain('\n\n## B');
+  });
+});
+
+describe('CardDoc 散文驱动（端点事实来自宿主）', () => {
+  const card = defineCard({
+    meta: { name: 'demo.echo', version: '1.0.0' },
+    in: z.object({ q: z.string().describe('查询词').meta({ examples: ['hi'] }) }),
+    out: z.object({ ok: z.boolean().describe('是否成功') }),
+    doc: {
+      signature: '把查询词原样回显。',
+      requestNotes: 'q 不可为空。',
+      responseNotes: '恒返回 200。',
+    },
+    collect: () => {},
+    respond: () => ({}) as never,
+  });
+
+  it('cardDocOf / hasCardDoc（散文 doc）', () => {
+    expect(hasCardDoc(card)).toBe(true);
+    expect(cardDocOf(card)?.signature).toBe('把查询词原样回显。');
+    const bare = defineCard({
+      meta: { name: 'demo.bare', version: '1.0.0' },
+      in: z.object({}),
+      out: z.object({}),
+      collect: () => {},
+      respond: () => ({}) as never,
+    });
+    expect(hasCardDoc(bare)).toBe(false);
+  });
+
+  it('endpointDocWithCard 合并端点事实 + 卡片散文 + 契约', () => {
+    const ep = endpointDocWithCard(card, {
+      method: 'GET',
+      path: '/api/demo/echo',
+      title: '回显',
+      auth: 'public',
+    });
+    expect(ep).toMatchObject({
+      method: 'GET',
+      path: '/api/demo/echo',
+      title: '回显',
+      auth: 'public',
+      signature: '把查询词原样回显。',
+    });
+    expect(ep.card).toBe(card);
+  });
+
+  it('renderCardDoc 含签名/参数释义/返回值释义段落', () => {
+    const md = renderCardDoc(card, {
+      method: 'GET',
+      path: '/api/demo/echo',
+      title: '回显',
+      auth: 'public',
+    });
+    expect(md.startsWith('## 回显\n')).toBe(true);
+    expect(md).toContain('把查询词原样回显。');
+    expect(md).toContain('| GET | /api/demo/echo | public |');
+    expect(md).toContain('q 不可为空。');
+    expect(md).toContain('恒返回 200。');
+    expect(md).toContain('| `q` | string | ✅ | 查询词 示例：`"hi"` |');
+  });
+
+  it('未填的可选段落不出现；标题缺省取卡片名', () => {
+    const min = defineCard({
+      meta: { name: 'demo.min', version: '1.0.0' },
+      in: z.object({}),
+      out: z.object({}),
+      collect: () => {},
+      respond: () => ({}) as never,
+    });
+    const md = renderCardDoc(min, { method: 'POST', path: '/api/demo/min' });
+    expect(md.startsWith('## demo.min\n')).toBe(true);
+    expect(md).toContain('| POST | /api/demo/min |');
+    expect(md).not.toContain('鉴权');
+    expect(md).not.toContain('**成功响应');
   });
 });

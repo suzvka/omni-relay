@@ -4,11 +4,22 @@
  */
 export { schemaToFields } from './fields';
 export type { SchemaToFieldsOptions } from './fields';
-export { renderFieldTable, renderJsonExample, renderEndpoint, renderEndpoints } from './render';
+export {
+  renderFieldTable,
+  renderJsonExample,
+  renderEndpoint,
+  renderEndpoints,
+  cardDocOf,
+  hasCardDoc,
+  endpointDocWithCard,
+  renderCardDoc,
+} from './render';
 export type {
   FieldDoc,
   FieldTableOptions,
   ErrorRow,
   EndpointDoc,
   RenderOptions,
+  CardDoc,
+  EndpointFacts,
 } from './types';

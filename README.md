@@ -145,6 +145,28 @@ const md = renderEndpoint({
 
 字段级中文说明取自 `.describe()`、示例取自 `.meta({ examples })`（经 `z.toJSONSchema` 原生透出）；HTTP 方法/路径、鉴权、响应信封等框架不认识的横切信息由宿主随 spec 传入。还提供 `schemaToFields` / `renderFieldTable` / `renderJsonExample` / `renderEndpoints` 供宿主自由组装整页。
 
+### 让文档随卡片声明（推荐）
+
+卡片的 `doc` 只放**端点散文**（反射不到、又不属于发布面事实的内容）；端点事实（method/path/title/auth）由宿主的发布面注册表传入，二者合成后渲染：
+
+```ts
+const creditTopup = defineCard({
+  meta: { name: 'credits.topups.create', version: '2.0.0' },
+  in: z.object({ sku_id: z.string().describe('档位 skuId').meta({ examples: ['credit-5000'] }) }),
+  out: z.object({ order_no: z.string().describe('订单号') }),
+  doc: { description: '客户端只声明档位，金额与到账积分由服务端快照。' }, // 散文，全部可选
+  collect: /* … */, respond: /* … */,
+});
+
+import { renderCardDoc } from 'omni-relay/docgen';
+// 端点事实来自你的发布面注册表（surface / OpenAPI / 路由表…）
+const md = renderCardDoc(creditTopup, {
+  method: 'POST', path: '/api/credits/topups', title: '创建充值订单', auth: 'session',
+});
+```
+
+`doc` 全部可选（`signature`/`description`/`requestNotes`/`responseNotes`/`requestExample`/`responseExample`/`errors`/`notes`/`hideFields`）——**未填的字段，生成文档时对应段落自动省略**。字段级释义走 `.describe()`（校验与文档同一份）；method/path 等事实属宿主的发布面注册表，不在 `doc` 里重复。
+
 > 渲染是宿主职责：把 `md` 拼进 Nextra/MDX 页面、写进 `content/` 由各项目自己的脚本完成。
 
 ## 📚 深入了解
