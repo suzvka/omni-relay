@@ -38,7 +38,7 @@ interface CatalogEntry extends RegisteredCard {
  * 控制面:卡片注册与卸载、源站卡片注册、源站绑定、配置注入、策略覆盖。
  * 治理动作经 onControlEvent 通知宿主(格式/存储/转发皆宿主事),框架自身不留存。
  * 服务目录为 name → current(每名字仅一份),服务面每次 handle 实时解析 → 原子切换,
- * in-flight 请求持旧版本引用跑完。
+ * in-flight 请求持旧版本引用跑完;源站卡片注册表在请求开始时快照,升级/卸载同样只影响新请求。
  * 回滚语义:框架不留存版本史(历史是卡片开发者/宿主制品层的责任);注册链以版本比较
  * 做门禁——同名同版本拒绝,低于 current 默认拒绝(防误发旧版),显式声明回滚意图
  * (opts.rollback)方可重发旧版制品原子替换(无下线窗口)。`deregisterCard` = 卸载。
@@ -248,8 +248,8 @@ export class RelayController {
    * 卸载业务卡片:从服务目录移除当前版本(handle 即 CARD.NOT_FOUND)。
    * in-flight 请求持旧引用跑完,不断服。卸载 ≠ 回滚:回滚 = 重发旧版制品
    * (注册时声明 {@link RegisterOptions.rollback});卸载后重新注册同版本制品不受限。
-   * 注意:v2 下 collect 经 ctx.invoke 按名动态解析源站卡片,卸载源站卡片后 invoke 即
-   * SOURCE_NOT_REGISTERED——不再内嵌副本,依赖是运行时解析的。
+   * 注意:v2 下 collect 经 ctx.invoke 按名解析源站卡片;注册表在请求开始时快照,
+   * in-flight 请求持快照跑完,卸载只影响新请求(新请求 invoke 即 SOURCE_NOT_REGISTERED)。
    */
   deregisterCard(name: string): this {
     const current = this.#cards.get(name);

@@ -18,14 +18,14 @@ export interface ControllerHooks {
 
 /**
  * 贯穿一次 handle 的执行上下文(collect 阶段)。
- * IR(`ir`)是自由直读直写的键值对缓存:collect 往其中收集/填充数据,
- * invoke 产物写入 `ir[id]`,respond 只读其中已有的值。
+ * IR(`ir`)是请求级黑板:每次 handle 新建、不跨请求复用(无 memoize/TTL/去重),
+ * collect 往其中收集/填充数据,invoke 产物写入 `ir[id]`,respond 只读其中已有的值。
  */
 export interface CollectCtx {
   readonly card: CardMeta;
   /** ▸in 校验后的入站请求(collect 从这里取值填进 IR) */
   readonly input: unknown;
-  /** IR:键值对缓存(已并入 seeds;invoke 产物写入 ir[id]) */
+  /** IR:请求级黑板(已并入 seeds;invoke 产物写入 ir[id]) */
   readonly ir: Record<string, unknown>;
   state: Map<unknown, unknown>;
   log: Logger;
@@ -38,15 +38,22 @@ export interface CollectCtx {
    * 编排原语:调用一张已注册的 API 卡片(源站卡片),产物写入 `ir[id]` 并返回。
    * - invoke(id):从 IR 按 source.input 取入参(过 ▸input 校验);
    * - invoke(id, input):用显式入参(仍过 ▸input);
-   * - 每次都走完整源站段(take/transport/retry/errorMap/put/各校验点/onBusRes)。
+   * - 每次都走完整源站段(take/transport/retry/errorMap/put/各校验点/onBusRes);
+   * - 同一请求内并发 invoke 同一 id 在 strict 下拒绝(GLUE.CARD.SOURCE_CONCURRENT):
+   *   ir[id] 是单槽位,并发写会互相覆盖;返回值始终是本次调用结果。
    */
   invoke: (id: string, input?: unknown) => Promise<unknown>;
   /** 当前 invoke 的源站卡片名(仅 onBusRes 期间的快照上有值) */
   sourceId?: string;
 }
 
-/** respond 阶段上下文:与 collect 同形,但类型层移除 invoke(只读 IR 构筑响应) */
-export type RespondCtx = Omit<CollectCtx, 'invoke'>;
+/**
+ * respond 阶段上下文:与 collect 同形,但移除 invoke、IR 收窄为只读。
+ * 类型层 Readonly;strict 模式运行期浅冻结(ctx.ir 顶层不可写,嵌套对象仍可变)。
+ */
+export interface RespondCtx extends Omit<CollectCtx, 'invoke' | 'ir'> {
+  readonly ir: Readonly<Record<string, unknown>>;
+}
 
 // ---------------------------------------------------------------------------
 // HTTP / 源站
@@ -116,6 +123,14 @@ export interface CardMeta {
 }
 
 /**
+ * 源站重试安全声明(约束自动重试;业务错误码重试另由 errorMap 控制):
+ * - auto(缺省):按 HTTP 方法,GET/PUT/DELETE 可重试,POST/PATCH 不重试;
+ * - idempotent:所有方法均可重试(源站承诺幂等,如携带幂等键);
+ * - unsafe:一律不自动重试。
+ */
+export type RetrySafety = 'auto' | 'idempotent' | 'unsafe';
+
+/**
  * 源站卡片原始定义(API 卡片 / 对接侧插件):封装"连接一个源站 + 清洗为原子字段"。
  * 对接者声明能力契约:需要哪些入参(input)、能提供哪些原子字段(output);
  * collect 经 ctx.invoke 按名调用,不接触源站细节。
@@ -141,6 +156,9 @@ export interface RawSourceCardDef<
   /** 可选:非流式为响应清洗;流式源站省略时流直写,声明时可对流做加工 */
   readonly put?: (raw: z.output<TUpRes>) => z.input<TOut> | Promise<z.input<TOut>>;
   readonly errorMap?: ErrorMapDef;
+  /** 重试安全声明:约束"结果不确定"的传输层错误(NETWORK/TIMEOUT)下的自动重试;
+   *  缺省 'auto' 按 HTTP 方法判定(POST/PATCH 禁止自动重试,除非显式 'idempotent') */
+  readonly retrySafety?: RetrySafety;
   /** 流式透传声明:声明后 event-stream 响应旁路校验,put 可省略;
    *  未声明却收到流式响应 → GLUE.BUSINESS.UPSTREAM_STREAM_UNDECLARED(旁路必须显式授予) */
   readonly stream?: boolean;
@@ -154,18 +172,27 @@ export interface SourceCard<
   readonly meta: CardMeta;
 }
 
+/** errorMap 映射项:业务码 + 可选对外 HTTP 状态与重试性(纯字符串为其简写) */
+export interface ErrorMapEntry {
+  code: string;
+  /** 对外 HTTP 状态(省略沿用默认 502) */
+  status?: number;
+  /** 是否可重试(省略时回退 retryableCodes) */
+  retryable?: boolean;
+}
+
 /** 源站业务错误映射:extract 提取源站码 → map(支持 "HTTP:404" 形态)→ fallback */
 export interface ErrorMapDef {
   extract?: (body: unknown) => string | null | undefined;
-  map?: Record<string, string>;
-  fallback?: string;
-  /** 映射后的业务码中可重试的(如 RATE_LIMITED) */
+  map?: Record<string, string | ErrorMapEntry>;
+  fallback?: string | ErrorMapEntry;
+  /** 兼容保留:字符串映射项的 retryable 查询表(映射项显式 retryable 优先) */
   retryableCodes?: readonly string[];
 }
 
 /**
  * 卡片原始定义(v2 命令式双钩子)。
- * IR 是自由键值缓存:collect 直读直写 IR 并按需 invoke API 卡片把数据收集进来,
+ * IR 是请求级黑板:collect 直读直写 IR 并按需 invoke API 卡片把数据收集进来,
  * respond 只读 IR 构筑出参。校验落在两端(in/out)与每次 invoke 的源站段(input/…)。
  */
 export interface RawCardDef<
@@ -236,7 +263,7 @@ export interface HandleOptions {
   signal?: AbortSignal;
   /** 请求级元数据(trace id 等),进入 ctx.meta,不进 IR */
   meta?: Record<string, unknown>;
-  /** 关闭 6 个校验点(默认全开) */
+  /** 关闭 6 个校验点(默认全开);亦关闭 respond IR 冻结与同 id 并发守卫 */
   strict?: boolean;
 }
 

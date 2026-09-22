@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { defineCard, defineSource, RelayController } from '../src/index';
+import { defineCard, defineSource, RegistrationError, RelayController } from '../src/index';
 import type { SourceCard } from '../src/index';
 import { mockSource } from '../src/testing';
 import { GOOD_BODY, makeSourceCard, setup } from './helpers';
@@ -49,6 +49,50 @@ describe('defineSource 声明期校验', () => {
     expect(() =>
       defineSource({ ...makeSourceCard().def, put: undefined, stream: true }),
     ).not.toThrow();
+  });
+
+  it('非法 retrySafety → 拒绝(step=source:retrySafety)', () => {
+    try {
+      defineSource({ ...makeSourceCard().def, retrySafety: 'sometimes' as never });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(RegistrationError);
+      expect((e as RegistrationError).step).toBe('source:retrySafety');
+    }
+  });
+
+  it('合法 retrySafety 与映射项新形状 → 通过', () => {
+    expect(() =>
+      defineSource({
+        ...makeSourceCard().def,
+        retrySafety: 'idempotent',
+        errorMap: {
+          extract: () => null,
+          map: { A: 'B', C: { code: 'D', status: 404, retryable: true } },
+          fallback: { code: 'E', status: 503 },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it('errorMap 非法结构 → 拒绝(空码 / status 越界 / retryable 非布尔)', () => {
+    const def = makeSourceCard().def;
+    expect(() => defineSource({ ...def, errorMap: { map: { X: '' } } })).toThrow(
+      /业务码不能为空/,
+    );
+    expect(() => defineSource({ ...def, errorMap: { map: { X: { code: '' } } } })).toThrow(
+      /必须是业务码字符串或/,
+    );
+    try {
+      defineSource({ ...def, errorMap: { map: { X: { code: 'Y', status: 99 } } } });
+      expect.unreachable();
+    } catch (e) {
+      expect(e).toBeInstanceOf(RegistrationError);
+      expect((e as RegistrationError).step).toBe('source:errorMap');
+    }
+    expect(() =>
+      defineSource({ ...def, errorMap: { fallback: { code: 'Y', retryable: 'yes' as never } } }),
+    ).toThrow(/retryable 必须是布尔值/);
   });
 });
 

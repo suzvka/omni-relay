@@ -1,6 +1,6 @@
 import type * as z from 'zod';
 import { RegistrationError } from './errors';
-import type { CardMeta, RawSourceCardDef, SourceCard } from './types';
+import type { CardMeta, ErrorMapDef, RawSourceCardDef, SourceCard } from './types';
 
 /**
  * 定义一张源站卡片(API 卡片 / 对接侧插件):封装"连接一个源站 + 清洗为原子字段"。
@@ -28,6 +28,14 @@ export function defineSource<
       'source:put',
     );
   }
+  const safety = def.retrySafety as unknown;
+  if (safety !== undefined && safety !== 'auto' && safety !== 'idempotent' && safety !== 'unsafe') {
+    throw new RegistrationError(
+      `retrySafety 必须是 'auto' | 'idempotent' | 'unsafe'(收到 ${String(safety)})`,
+      'source:retrySafety',
+    );
+  }
+  assertErrorMap(def.errorMap);
   const meta: CardMeta = {
     name: def.meta?.name ?? '',
     version: def.meta?.version ?? '0.0.0',
@@ -46,4 +54,35 @@ function assertZod(schema: unknown, where: string): void {
   if (!s || typeof s.safeParse !== 'function') {
     throw new RegistrationError(`${where} 必须是 Zod schema`, `source:${where}`);
   }
+}
+
+/** errorMap 形状校验:条目为非空业务码字符串,或 { code, status?(100–599), retryable? } 对象 */
+function assertErrorMap(em: ErrorMapDef | undefined): void {
+  if (em === undefined) return;
+  const check = (value: unknown, where: string): void => {
+    if (typeof value === 'string') {
+      if (!value) throw new RegistrationError(`${where} 的业务码不能为空`, 'source:errorMap');
+      return;
+    }
+    const entry = value as { code?: unknown; status?: unknown; retryable?: unknown } | null;
+    if (!entry || typeof entry !== 'object' || typeof entry.code !== 'string' || !entry.code) {
+      throw new RegistrationError(
+        `${where} 必须是业务码字符串或 { code, status?, retryable? } 对象`,
+        'source:errorMap',
+      );
+    }
+    if (
+      entry.status !== undefined &&
+      (!Number.isInteger(entry.status) ||
+        (entry.status as number) < 100 ||
+        (entry.status as number) > 599)
+    ) {
+      throw new RegistrationError(`${where}.status 必须是 100–599 的整数`, 'source:errorMap');
+    }
+    if (entry.retryable !== undefined && typeof entry.retryable !== 'boolean') {
+      throw new RegistrationError(`${where}.retryable 必须是布尔值`, 'source:errorMap');
+    }
+  };
+  for (const [key, value] of Object.entries(em.map ?? {})) check(value, `errorMap.map.${key}`);
+  if (em.fallback !== undefined) check(em.fallback, 'errorMap.fallback');
 }

@@ -258,3 +258,100 @@ describe('collect + ctx.invoke 编排', () => {
     expect(hasInvoke).toBe(false);
   });
 });
+
+describe('同源并发与只读边界', () => {
+  it('strict 下同 id 并发 invoke → GLUE.CARD.SOURCE_CONCURRENT(仅 1 次源站调用)', async () => {
+    const solo = makeEchoSourceCard('solo');
+    const card = defineCard({
+      meta: { name: 'orchestrate.sameid', version: '1.0.0' },
+      in: z.object({}),
+      out: z.object({ ok: z.boolean() }),
+      uses: [solo.meta.name],
+      collect: async (ctx) => {
+        await Promise.all([
+          ctx.invoke(solo.meta.name, { n: 1 }),
+          ctx.invoke(solo.meta.name, { n: 2 }),
+        ]);
+      },
+      respond: () => ({ ok: true }),
+    });
+    const { relay, mocks } = setupInvoke(card, [solo], { 'svc/echo-solo': { body: { v: 9 } } });
+    const e = await relay.handle('orchestrate.sameid', {}).catch((x: unknown) => x);
+    expect(e).toMatchObject({ code: 'GLUE.CARD.SOURCE_CONCURRENT', sourceId: solo.meta.name });
+    expect(mocks[0]!.mock.calls).toHaveLength(1); // 第二个调用在发起源站请求前就被拒绝
+  });
+
+  it('strict:false 下同 id 并发:不拒绝,ir[id] 后写覆盖且各自返回本次结果', async () => {
+    const dup = makeEchoSourceCard('dup');
+    let results: number[] = [];
+    let slot = -1;
+    const card = defineCard({
+      meta: { name: 'orchestrate.dup', version: '1.0.0' },
+      in: z.object({}),
+      out: z.object({ ok: z.boolean() }),
+      uses: [dup.meta.name],
+      collect: async (ctx) => {
+        const [r1, r2] = await Promise.all([
+          ctx.invoke(dup.meta.name, { n: 1 }) as Promise<{ v: number }>,
+          ctx.invoke(dup.meta.name, { n: 2 }) as Promise<{ v: number }>,
+        ]);
+        results = [r1.v, r2.v];
+        slot = (ctx.ir[dup.meta.name] as { v: number }).v;
+      },
+      respond: () => ({ ok: true }),
+    });
+    const { relay } = setupInvoke(card, [dup], {
+      // 第一次调用完成更晚 → ir[id] 最后被它写入(后写覆盖)
+      'svc/echo-dup': async (_req, call) => {
+        if (call === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+        return { body: { v: call === 0 ? 1 : 2 } };
+      },
+    });
+    await relay.handle('orchestrate.dup', {}, { strict: false });
+    expect(results).toEqual([1, 2]); // invoke 返回值始终是本次调用结果
+    expect(slot).toBe(1); // ir[id] 单槽位:最后完成者胜出
+  });
+
+  it('strict 下 respond 写 IR → TypeError(只读契约运行期强制)', async () => {
+    const token = makeTokenSourceCard();
+    const card = defineCard({
+      meta: { name: 'r.readonly', version: '1.0.0' },
+      in: z.object({}),
+      out: z.object({ ok: z.boolean() }),
+      uses: [token.meta.name],
+      collect: async (ctx) => {
+        ctx.ir.productId = 'P';
+        await ctx.invoke(token.meta.name);
+      },
+      respond: (ctx) => {
+        // @ts-expect-error RespondCtx.ir 为只读,类型层禁止写入
+        ctx.ir.hacked = true;
+        return { ok: true };
+      },
+    });
+    const { relay } = setupInvoke(card, [token], { 'svc/token': { body: TOKEN_BODY } });
+    await expect(relay.handle('r.readonly', {})).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it('strict:false 下 respond 写 IR 不抛(冻结随 strict 关闭)', async () => {
+    const token = makeTokenSourceCard();
+    const card = defineCard({
+      meta: { name: 'r.readonly-off', version: '1.0.0' },
+      in: z.object({}),
+      out: z.object({ ok: z.boolean() }),
+      uses: [token.meta.name],
+      collect: async (ctx) => {
+        ctx.ir.productId = 'P';
+        await ctx.invoke(token.meta.name);
+      },
+      respond: (ctx) => {
+        (ctx.ir as Record<string, unknown>).hacked = true; // 非 strict:不冻结(仍属契约外行为)
+        return { ok: true };
+      },
+    });
+    const { relay } = setupInvoke(card, [token], { 'svc/token': { body: TOKEN_BODY } });
+    await expect(relay.handle('r.readonly-off', {}, { strict: false })).resolves.toEqual({
+      ok: true,
+    });
+  });
+});

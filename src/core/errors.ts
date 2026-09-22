@@ -130,6 +130,18 @@ export class GlueError extends Error {
     });
   }
 
+  /** 同一请求内并发调用同一源站卡片(strict 下拒绝:ir[id] 单槽位会被互相覆盖) */
+  static sourceConcurrent(sourceId: string): GlueError {
+    return new GlueError({
+      code: 'GLUE.CARD.SOURCE_CONCURRENT',
+      message: `源站卡片 ${sourceId} 在本请求内被并发调用:ir[${sourceId}] 为单槽位,请拆分调用或改用不同源站卡片`,
+      retryable: false,
+      status: 500,
+      seam: 'invoke',
+      sourceId,
+    });
+  }
+
   static unknown(cause: unknown): GlueError {
     return new GlueError({
       code: 'GLUE.UNKNOWN',

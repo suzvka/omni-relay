@@ -19,13 +19,13 @@
 
 把多个异构上游聚合成一套对外稳定的商品 API，你会反复踩同一批坑：每个上游的入参、鉴权、字段命名都不一样，脏字段悄悄泄漏进对外契约；业务过程天然是命令式的——先取 A、用 A 决定要不要取 B、失败要降级，声明式数据流怎么写都别扭；上游会超时、限流、宕机，「可重试」和「业务性失败」永远分不清；对接的人和业务的人是两拨人，逻辑却缠在一起，谁也不敢动。
 
-omni-relay 的答案是：**卡片化 + IR 键值缓存 + 命令式双钩子**。每个能力都是一张卡片，一次执行围绕一块 IR 展开，治理与执行两个面彻底分离。
+omni-relay 的答案是：**卡片化 + 请求级 IR 黑板 + 命令式双钩子**。每个能力都是一张卡片，一次执行围绕一块 IR 展开，治理与执行两个面彻底分离。
 
 - **卡片化对接** —— `defineSource` 封装「连接一个源站 + 清洗为原子字段」，脏字段一律挡在 IR 之外
 - **命令式编排** —— `collect` 直读直写 IR、按需 `ctx.invoke` 取数，`respond` 只读构筑出参，过程一眼可见
-- **容灾内建** —— 超时、重试、退避、源站切换开箱即用，`retryable` 是切换的唯一信号，业务性失败绝不盲试
+- **可控容灾** —— 超时与重试为显式策略（`retry.max` 缺省 0）；非幂等方法（POST/PATCH）默认不自动重试，`retrySafety: 'idempotent'` 显式放行；多源切换在 `collect` 手写 `retryable` 判断，业务性失败绝不盲试
 - **两侧解耦** —— 对接者只声明能力契约、不知道谁消费；业务卡片按名 `invoke`，各自独立演进、独立版本化
-- **服务不断** —— 控制面治理、服务面执行，升级、回滚、卸载都是原子切换，没有下线窗口
+- **服务不断** —— 控制面治理、服务面执行，升级、回滚、卸载都是原子切换，没有下线窗口；in-flight 请求持注册表与依赖快照跑完
 
 ## 🚀 快速开始
 
@@ -104,6 +104,18 @@ for (const id of ['endpoint.a', 'endpoint.b']) {
   catch (e) { if (e instanceof GlueError && e.retryable) continue; throw e; }
 }
 
+// 错误映射 —— 业务码、对外 HTTP 状态、重试性一次说清（字符串写法为其简写）
+defineSource({
+  errorMap: {
+    extract: (body) => (body as { error?: { code?: string } })?.error?.code,
+    map: {
+      ITEM_NOT_FOUND: { code: 'PRODUCT_NOT_FOUND', status: 404 },
+      RATE_LIMITED: { code: 'UPSTREAM_RATE_LIMITED', retryable: true },
+    },
+  },
+  /* ... */
+});
+
 // 离线测试 —— mock 传输，无需真实网络
 const src = mockSource('jd/items/detail', { body: { item_name: 'X', price: 9.9, stock: 3 } });
 ```
@@ -116,9 +128,10 @@ const src = mockSource('jd/items/detail', { body: { item_name: 'X', price: 9.9, 
 | --- | --- |
 | API 卡片 | `defineSource` 声明对接契约：入参提取、请求构建、字段清洗、错误映射，一环不缺 |
 | 业务卡片 | `defineCard` 声明商品 API：`collect` / `respond` 双钩子，取数与构筑语义分明 |
-| IR 键值缓存 | 贯穿一次执行的公共黑板：seeds 注入、invoke 写回、宿主规则介入面 |
+| IR（请求级黑板） | 每次 handle 新建：seeds 注入、invoke 写回、宿主规则介入面；不跨请求复用（无 memoize/TTL/去重） |
 | 契约校验 | 管道 6 个 Zod 校验点，任何一跳失败都收敛为统一 `GlueError`，raw 永不透出 |
-| 重试与容灾 | `timeoutMs` / `retry` 策略覆盖，`retryable` 驱动重试与源站切换 |
+| 语义守卫 | `strict`（默认开）下：`respond` 前 IR 浅冻结、同 id 并发 `invoke` 拒绝、源站注册表请求级快照 |
+| 重试与幂等安全 | `timeoutMs` / `retry` 策略覆盖；传输层歧义错误按方法幂等性放行（`retrySafety`），业务错误码凭映射项 / `retryableCodes` 显式开启 |
 | 组合根注入 | `RelayControllerOptions` 可替换 transport / registry；Pipeline 只依赖 `SourceResolver` 最小端口 |
 | 流式透传 | SSE 声明式直通，未声明即拒绝，失败自动 `cancel` 防悬挂 |
 | 版本治理 | manifest 交叉校验、版本门禁拒绝旧版误发、原子切换不断服 |

@@ -164,6 +164,63 @@ describe('错误映射', () => {
     });
     expect(flaky.mock.calls.length).toBe(2);
   });
+
+  it('映射项带 status:业务码与对外 HTTP 状态同步覆盖(含 toFetchHandler)', async () => {
+    const sc = makeSourceCard({
+      errorMap: {
+        extract: codeOf,
+        map: { ITEM_NOT_FOUND: { code: 'PRODUCT_NOT_FOUND', status: 404 } },
+      },
+    });
+    const { relay } = setup({
+      card: makeCard({ sourceCard: sc }),
+      sourceCards: [sc],
+      mockBody: { error: { code: 'ITEM_NOT_FOUND' } },
+    });
+    const e = await relay.handle('product.detail', { sku: 'A1' }).catch((x: unknown) => x);
+    expect(e).toMatchObject({ code: 'GLUE.BUSINESS.PRODUCT_NOT_FOUND', status: 404 });
+
+    const res = await relay.toFetchHandler()(new Request('http://x/product.detail?sku=A1'));
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({
+      error: { code: 'GLUE.BUSINESS.PRODUCT_NOT_FOUND', sourceId: sc.meta.name },
+    });
+  });
+
+  it('fallback 对象形态:code + status 一并生效', async () => {
+    const sc = makeSourceCard({
+      errorMap: { extract: codeOf, fallback: { code: 'UPSTREAM_UNKNOWN', status: 503 } },
+    });
+    const mock = mockSource(sc.def.ref, { status: 500, body: { unexpected: true } });
+    const { relay } = setup({ card: makeCard({ sourceCard: sc }), sourceCards: [sc], mocks: [mock] });
+    await expect(relay.handle('product.detail', { sku: 'A1' })).rejects.toMatchObject({
+      code: 'GLUE.BUSINESS.UPSTREAM_UNKNOWN',
+      status: 503,
+    });
+  });
+
+  it('映射项 retryable:false 优先于 retryableCodes(显式否定)', async () => {
+    const sc = makeSourceCard({
+      errorMap: {
+        extract: codeOf,
+        map: { RATE_LIMITED: { code: 'UPSTREAM_RATE_LIMITED', retryable: false } },
+        retryableCodes: ['UPSTREAM_RATE_LIMITED'],
+      },
+    });
+    const flaky = mockSource(sc.def.ref, (_req, i) =>
+      i === 0 ? { body: { error: { code: 'RATE_LIMITED' } } } : { body: GOOD_BODY },
+    );
+    const { relay } = setup({
+      card: makeCard({ sourceCard: sc }),
+      sourceCards: [sc],
+      mocks: [flaky],
+      policy: { retry: { max: 1, backoff: 'fixed' } },
+    });
+    await expect(relay.handle('product.detail', { sku: 'A1' })).rejects.toMatchObject({
+      code: 'GLUE.BUSINESS.UPSTREAM_RATE_LIMITED',
+    });
+    expect(flaky.mock.calls.length).toBe(1); // 显式 retryable:false → 不重试
+  });
 });
 
 describe('框架钩子(宿主规则在 IR 上的执行点)', () => {
