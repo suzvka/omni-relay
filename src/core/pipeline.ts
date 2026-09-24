@@ -53,16 +53,12 @@ export interface PipelineDeps {
   defaultTimeoutMs: number;
 }
 
-function now(): number {
-  return typeof performance !== 'undefined' ? performance.now() : Date.now();
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * 执行一张卡片(v2 命令式双钩子):
+ * 执行一张卡片(命令式双钩子):
  * in① → seeds 并入 IR → [onBusReq] → collect(直读直写 IR + invoke) → respond(只读 IR) → out⑥。
  * IR 贯穿全程;任何一跳失败都收敛为 GlueError 直接抛出。
  * strict(缺省开):源站注册表请求级快照、同 id 并发 invoke 拒绝、respond 前 IR 浅冻结。
@@ -93,11 +89,8 @@ export async function runCard(
     card: card.meta,
     input: parsedInput,
     ir,
-    state: new Map(),
     log: deps.logger,
     signal: opts.signal ?? new AbortController().signal,
-    timing: {},
-    meta: opts.meta ?? {},
     invoke: (id, given) => invokeSource(deps, entry.policy, ctx, runtime, id, given, strict),
   };
 
@@ -106,17 +99,13 @@ export async function runCard(
     if (deps.hooks?.onBusReq) await deps.hooks.onBusReq(ctx);
 
     // collect 接缝:业务过程本身(往 IR 收集填充数据 + 按需 invoke API 卡片)
-    const tCollect = now();
     await def.collect(ctx);
-    ctx.timing['collect'] = now() - tCollect;
 
     // respond 接缝:移除 invoke(类型层 + 运行时均不可再调 API 卡片),只读 IR 构筑出参;
     // strict 下浅冻结 IR:写入立即抛 TypeError,把只读契约从约定升级为运行期保证
-    const tRespond = now();
     const { invoke: _invoke, ...respondCtx } = ctx;
     if (strict) Object.freeze(ir);
     const rawOut = await def.respond(respondCtx);
-    ctx.timing['respond'] = now() - tRespond;
 
     return strict ? checkAt('out', def.out, rawOut) : rawOut;
   } catch (e) {
@@ -132,7 +121,7 @@ export async function runCard(
  * 编排原语内核:从请求级快照解析源站卡片 → 执行一次完整源站段 → 产物写入 ir[id] 并返回。
  * given 给定时用显式入参;否则从 IR 按 source.input 取(印证"确保 IR 已填好该 API 所需入参")。
  * 依赖一致性:注册表在请求开始时快照,热升级/卸载不影响 in-flight 请求。
- * 并发语义:不同 id 天然隔离(按键写 ir/timing);strict 下同 id 并发拒绝,
+ * 并发语义:不同 id 天然隔离(按键写 ir);strict 下同 id 并发拒绝,
  * 非 strict 同 id 并发为 ir[id] 后写覆盖(invoke 返回值始终是本次调用结果)。
  */
 async function invokeSource(
@@ -166,7 +155,6 @@ async function invokeSource(
       });
     }
 
-    const t0 = now();
     // 入参:显式 given 优先,否则从 IR 取(过 ▸input 校验;source.input 从 IR 提取所需键)
     const rawInput = given !== undefined ? given : ctx.ir;
     const srcInput = strict ? checkAt('input', srcDef.input, rawInput, id) : rawInput;
@@ -177,7 +165,6 @@ async function invokeSource(
 
     // transport + 重试 + 业务映射
     const result = await fetchMapped(deps, policy, binding, ureq, ctx.signal, srcDef, id);
-    ctx.timing[`${id}.fetch`] = now() - t0;
 
     // 流式守卫:旁路校验是显式授予的特权,未声明 stream 的源站收到流式响应直接拒绝
     if (result.stream && !srcDef.stream) {
@@ -197,7 +184,6 @@ async function invokeSource(
 
     // 写回 IR(命名空间 by id),触发宿主 onBusRes(带本次 sourceId 的快照)
     ctx.ir[id] = product;
-    ctx.timing[`${id}.invoke`] = now() - t0;
     if (deps.hooks?.onBusRes) await deps.hooks.onBusRes({ ...ctx, sourceId: id });
     return product;
   } finally {
@@ -291,7 +277,7 @@ async function fetchMapped(
         {
           sourceId: srcId,
           raw: result.body,
-          // 显式 retryable 优先,回退 retryableCodes(兼容旧字符串写法)
+          // 显式 retryable 优先,回退 retryableCodes(字符串映射项)
           retryable: mappedEntry.retryable ?? em?.retryableCodes?.includes(mappedEntry.code) ?? false,
           status: mappedEntry.status,
         },

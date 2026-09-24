@@ -150,7 +150,7 @@ export interface MockResponse {
 export type MockResponder =
   | MockResponse
   | readonly MockResponse[]
-  | ((req: UpstreamRequest, call: number) => MockResponse | Promise<MockResponse>);
+  | ((call: number) => MockResponse | Promise<MockResponse>);
 
 /** 可观测的 mock fetch:记录每次调用,按函数/单值/序列回放;尊重 AbortSignal */
 export class MockSource {
@@ -182,12 +182,7 @@ export class MockSource {
 
   private async pick(call: number): Promise<MockResponse> {
     if (typeof this.responder === 'function') {
-      return await (
-        this.responder as (
-          req: UpstreamRequest & Record<string, unknown>,
-          call: number,
-        ) => MockResponse | Promise<MockResponse>
-      )({ body: undefined } as UpstreamRequest & Record<string, unknown>, call);
+      return await this.responder(call);
     }
     if (Array.isArray(this.responder)) {
       const idx = Math.min(call, this.responder.length - 1);

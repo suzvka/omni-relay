@@ -130,7 +130,7 @@ describe('错误映射', () => {
         retryableCodes: ['UPSTREAM_RATE_LIMITED'],
       },
     });
-    const flaky = mockSource(sc.def.ref, (_req, i) =>
+    const flaky = mockSource(sc.def.ref, (i) =>
       i < 2 ? { body: { error: { code: 'RATE_LIMITED' } } } : { body: GOOD_BODY },
     );
     const { relay } = setup({
@@ -207,7 +207,7 @@ describe('错误映射', () => {
         retryableCodes: ['UPSTREAM_RATE_LIMITED'],
       },
     });
-    const flaky = mockSource(sc.def.ref, (_req, i) =>
+    const flaky = mockSource(sc.def.ref, (i) =>
       i === 0 ? { body: { error: { code: 'RATE_LIMITED' } } } : { body: GOOD_BODY },
     );
     const { relay } = setup({

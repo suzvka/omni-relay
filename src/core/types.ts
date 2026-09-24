@@ -27,13 +27,8 @@ export interface CollectCtx {
   readonly input: unknown;
   /** IR:请求级黑板(已并入 seeds;invoke 产物写入 ir[id]) */
   readonly ir: Record<string, unknown>;
-  state: Map<unknown, unknown>;
   log: Logger;
   signal: AbortSignal;
-  /** 各阶段耗时(键:collect/respond 或 "<id>.fetch"/"<id>.invoke") */
-  timing: Record<string, number>;
-  /** 请求级透传元数据(trace id 等),不进 IR */
-  meta: Record<string, unknown>;
   /**
    * 编排原语:调用一张已注册的 API 卡片(源站卡片),产物写入 `ir[id]` 并返回。
    * - invoke(id):从 IR 按 source.input 取入参(过 ▸input 校验);
@@ -186,12 +181,12 @@ export interface ErrorMapDef {
   extract?: (body: unknown) => string | null | undefined;
   map?: Record<string, string | ErrorMapEntry>;
   fallback?: string | ErrorMapEntry;
-  /** 兼容保留:字符串映射项的 retryable 查询表(映射项显式 retryable 优先) */
+  /** 字符串映射项的 retryable 查询表(映射项显式 retryable 优先) */
   retryableCodes?: readonly string[];
 }
 
 /**
- * 卡片原始定义(v2 命令式双钩子)。
+ * 卡片原始定义(命令式双钩子)。
  * IR 是请求级黑板:collect 直读直写 IR 并按需 invoke API 卡片把数据收集进来,
  * respond 只读 IR 构筑出参。校验落在两端(in/out)与每次 invoke 的源站段(input/…)。
  */
@@ -204,7 +199,7 @@ export interface RawCardDef<
   in: TIn;
   /** ⑥ 出参契约(respond 产物;▸out 校验点) */
   out: TOut;
-  /** 宿主注册期注入的 IR 初始键(替代 inject):buildRelay 一次性校验存在 + 类型 */
+  /** 宿主注册期注入的 IR 初始键:buildRelay 一次性校验存在 + 类型 */
   seeds?: Record<string, z.ZodType>;
   /** 可选:声明可能 invoke 的源站卡片名(manifest 交叉校验 + inspect 依赖边);不限制 invoke */
   uses?: readonly string[];
@@ -240,7 +235,7 @@ export interface RetryPolicy {
   backoff: 'fixed' | 'expo';
 }
 
-/** 卡片建议 + 框架覆盖后的解析结果(多源容灾由 collect 手写,框架不再有策略) */
+/** 卡片建议 + 框架覆盖后的解析结果(多源容灾由 collect 手写) */
 export interface PolicyInput {
   timeoutMs?: number;
   retry?: RetryPolicy;
@@ -261,8 +256,6 @@ export interface RegisterOptions {
 /** 服务面调用选项 */
 export interface HandleOptions {
   signal?: AbortSignal;
-  /** 请求级元数据(trace id 等),进入 ctx.meta,不进 IR */
-  meta?: Record<string, unknown>;
   /** 关闭 6 个校验点(默认全开);亦关闭 respond IR 冻结与同 id 并发守卫 */
   strict?: boolean;
 }

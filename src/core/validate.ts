@@ -19,7 +19,7 @@ export function checkAt(
   return result.data;
 }
 
-export function formatIssues(issues: readonly { path: PropertyKey[]; message: string }[]): string {
+function formatIssues(issues: readonly { path: PropertyKey[]; message: string }[]): string {
   if (issues.length === 0) return '(无 issue)';
   return issues
     .map((i) => `${i.path.length ? i.path.map(String).join('.') : '(root)'}: ${i.message}`)

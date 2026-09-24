@@ -3,7 +3,7 @@ import { RegistrationError } from './errors';
 import type { CardMeta, RawCardDef, RelayCard } from './types';
 
 /**
- * 定义一张商品卡片(v2 命令式双钩子:collect / respond)。
+ * 定义一张商品卡片(命令式双钩子:collect / respond)。
  * 卡片是 IR 的编排者:collect 直读直写 IR、按需 invoke API 卡片把数据收集进来,
  * respond 只读 IR 构筑出参;它只对 IR 契约负责,不接触源站细节——对接逻辑住在被 invoke 的源站卡片里。
  * 声明期即做自洽校验,"对不上"在这里就地报错。

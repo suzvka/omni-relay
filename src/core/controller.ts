@@ -248,7 +248,7 @@ export class RelayController {
    * 卸载业务卡片:从服务目录移除当前版本(handle 即 CARD.NOT_FOUND)。
    * in-flight 请求持旧引用跑完,不断服。卸载 ≠ 回滚:回滚 = 重发旧版制品
    * (注册时声明 {@link RegisterOptions.rollback});卸载后重新注册同版本制品不受限。
-   * 注意:v2 下 collect 经 ctx.invoke 按名解析源站卡片;注册表在请求开始时快照,
+   * 注意:collect 经 ctx.invoke 按名解析源站卡片;注册表在请求开始时快照,
    * in-flight 请求持快照跑完,卸载只影响新请求(新请求 invoke 即 SOURCE_NOT_REGISTERED)。
    */
   deregisterCard(name: string): this {

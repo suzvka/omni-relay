@@ -302,7 +302,7 @@ describe('同源并发与只读边界', () => {
     });
     const { relay } = setupInvoke(card, [dup], {
       // 第一次调用完成更晚 → ir[id] 最后被它写入(后写覆盖)
-      'svc/echo-dup': async (_req, call) => {
+      'svc/echo-dup': async (call) => {
         if (call === 0) await new Promise((resolve) => setTimeout(resolve, 20));
         return { body: { v: call === 0 ? 1 : 2 } };
       },

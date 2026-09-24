@@ -101,7 +101,7 @@ describe('重试安全门禁(传输层歧义错误按方法幂等性放行)', ()
   it('POST + retrySafety:idempotent:显式放行后重试(首次网络错,二次成功)', async () => {
     const { relay, src } = setupRetry(
       makeMethodSourceCard('POST', { retrySafety: 'idempotent' }),
-      (_req, i) => {
+      (i) => {
         if (i === 0) throw new Error('network down');
         return { body: { v: 7 } };
       },
@@ -160,7 +160,7 @@ describe('业务错误码重试不受方法门禁(响应已到达,源站已拒�
     });
     const { relay, src } = setupRetry(
       sc,
-      (_req, i) => (i === 0 ? { body: { error: { code: 'RATE_LIMITED' } } } : { body: { v: 3 } }),
+      (i) => (i === 0 ? { body: { error: { code: 'RATE_LIMITED' } } } : { body: { v: 3 } }),
       RETRY1,
     );
     const out = await relay.handle('re.exec', {});
@@ -177,7 +177,7 @@ describe('业务错误码重试不受方法门禁(响应已到达,源站已拒�
     });
     const { relay, src } = setupRetry(
       sc,
-      (_req, i) => (i === 0 ? { body: { error: { code: 'RATE_LIMITED' } } } : { body: { v: 4 } }),
+      (i) => (i === 0 ? { body: { error: { code: 'RATE_LIMITED' } } } : { body: { v: 4 } }),
       RETRY1,
     );
     const out = await relay.handle('re.exec', {});

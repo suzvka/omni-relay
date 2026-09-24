@@ -135,7 +135,7 @@ const src = mockSource('jd/items/detail', { body: { item_name: 'X', price: 9.9, 
 | 组合根注入 | `RelayControllerOptions` 可替换 transport / registry；Pipeline 只依赖 `SourceResolver` 最小端口 |
 | 流式透传 | SSE 声明式直通，未声明即拒绝，失败自动 `cancel` 防悬挂 |
 | 版本治理 | manifest 交叉校验、版本门禁拒绝旧版误发、原子切换不断服 |
-| 管理视图 | `inspectCard` / `listCards` / 治理事件回调，认证材料只留 `hasAuth` 布尔 |
+| 管理视图 | `inspectCard` / `listCards` / `listBindings` / 治理事件回调，认证材料只留 `hasAuth` 布尔 |
 | 测试子入口 | `omni-relay/testing`：mock 传输、单值/序列/函数回放、SSE 回放 |
 
 ## 📖 文档生成（omni-relay/docgen）
@@ -177,10 +177,6 @@ const md = renderCardDoc(creditTopup, {
   method: 'POST', path: '/api/credits/topups', title: '创建充值订单', auth: 'session',
 });
 ```
-
-`doc` 全部可选（`signature`/`description`/`requestNotes`/`responseNotes`/`requestExample`/`responseExample`/`errors`/`notes`/`hideFields`）——**未填的字段，生成文档时对应段落自动省略**。字段级释义走 `.describe()`（校验与文档同一份）；method/path 等事实属宿主的发布面注册表，不在 `doc` 里重复。
-
-> 渲染是宿主职责：把 `md` 拼进 Nextra/MDX 页面、写进 `content/` 由各项目自己的脚本完成。
 
 ## 📚 深入了解
 

@@ -39,7 +39,6 @@ export interface GlueErrorInit {
   seam: Seam | 'control';
   sourceId?: string;
   raw?: unknown;
-  cause?: unknown;
 }
 
 /**
