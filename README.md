@@ -156,7 +156,7 @@ const md = renderEndpoint({
 });
 ```
 
-字段级中文说明取自 `.describe()`、示例取自 `.meta({ examples })`（经 `z.toJSONSchema` 原生透出）；HTTP 方法/路径、鉴权、响应信封等框架不认识的横切信息由宿主随 spec 传入。还提供 `schemaToFields` / `renderFieldTable` / `renderJsonExample` / `renderEndpoints` 供宿主自由组装整页。
+字段级中文说明取自 `.describe()`（静态文本，参数名与类型由 Zod 契约反射）；示例不进字段表，由 `requestExample` / `responseExample` 的 JSON 代码块统一承载；HTTP 方法/路径、鉴权、响应信封等框架不认识的横切信息由宿主随 spec 传入。还提供 `schemaToFields` / `renderFieldTable` / `renderJsonExample` / `renderEndpoints` 供宿主自由组装整页。
 
 ### 让文档随卡片声明（推荐）
 

@@ -16,7 +16,6 @@ export {
 } from './render';
 export type {
   FieldDoc,
-  FieldTableOptions,
   ErrorRow,
   EndpointDoc,
   RenderOptions,

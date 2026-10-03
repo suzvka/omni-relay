@@ -12,7 +12,6 @@ interface JsonSchemaNode {
   enum?: unknown[];
   const?: unknown;
   description?: string;
-  examples?: unknown[];
   anyOf?: JsonSchemaNode[];
   oneOf?: JsonSchemaNode[];
   allOf?: JsonSchemaNode[];
@@ -26,7 +25,7 @@ export interface SchemaToFieldsOptions {
 /**
  * 把一个 Zod schema 展平为字段行列表:容器自身也出一行(type=object / object[]),
  * 子字段以 `a.b` / `items[].sku` 路径跟进,深度递进。
- * 说明取自 `.describe()`,示例取自 `.meta({ examples })`(经 toJSONSchema 原生透出)。
+ * 说明取自 `.describe()`(静态文本);示例不进字段,由端点散文的 requestExample / responseExample 承载。
  * 复用/递归 schema 的 `$ref` 按 `$defs` 解析,并以分支级 visited 集合防止无限展开。
  */
 export function schemaToFields(
@@ -78,8 +77,6 @@ function emitField(
     type: typeLabel(node),
     required,
     ...(node.description ? { description: node.description } : {}),
-    ...(node.enum ? { enumValues: node.enum.map(String) } : {}),
-    ...(node.examples && node.examples.length > 0 ? { example: node.examples[0] } : {}),
     depth,
   });
 

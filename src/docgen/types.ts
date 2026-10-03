@@ -18,23 +18,8 @@ export interface FieldDoc {
   required: boolean;
   /** 字段说明(来自 `.describe()`) */
   description?: string;
-  /** 枚举取值(来自 enum / const;已并入 type 标签,此处另存一份供宿主自取) */
-  enumValues?: string[];
-  /** 示例(来自 `.meta({ examples })`,取首个) */
-  example?: unknown;
   /** 嵌套深度(根字段为 0) */
   depth: number;
-}
-
-/** 字段表渲染选项 */
-export interface FieldTableOptions {
-  /** 覆盖表头列名 */
-  headers?: { field?: string; type?: string; required?: string; description?: string };
-  /** 必填/可选标记(默认 ✅ / —) */
-  requiredMark?: string;
-  optionalMark?: string;
-  /** 是否在说明列内联展示示例(默认 true) */
-  showExamples?: boolean;
 }
 
 /** 错误速查行 */
@@ -85,8 +70,6 @@ export interface RenderOptions {
   successStatus?: number;
   /** 标题层级(默认 2,即 `##` / `###`) */
   headingLevel?: number;
-  /** 字段表选项,请求/响应共用 */
-  fieldTable?: FieldTableOptions;
 }
 
 /**

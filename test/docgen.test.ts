@@ -14,14 +14,14 @@ import {
 } from '../src/docgen';
 
 describe('schemaToFields', () => {
-  it('展平必填/可选并读取 describe 与 meta 示例', () => {
+  it('展平必填/可选并读取 describe;meta 示例不渗入字段行', () => {
     const schema = z.object({
       sku: z.string().describe('档位 skuId').meta({ examples: ['A1'] }),
       count: z.number().int().optional().describe('数量'),
     });
     const fields = schemaToFields(schema, { io: 'input' });
     expect(fields).toEqual([
-      { path: 'sku', name: 'sku', type: 'string', required: true, description: '档位 skuId', example: 'A1', depth: 0 },
+      { path: 'sku', name: 'sku', type: 'string', required: true, description: '档位 skuId', depth: 0 },
       { path: 'count', name: 'count', type: 'integer', required: false, description: '数量', depth: 0 },
     ]);
   });
@@ -133,7 +133,7 @@ describe('renderEndpoint', () => {
     expect(md).toContain('| 请求方式 | 端点 | 鉴权 |');
     expect(md).toContain('| POST | /api/demo/echo | session |');
     expect(md).toContain('回显档位。');
-    expect(md).toContain('| `sku` | string | ✅ | 档位 skuId 示例：`"A1"` |');
+    expect(md).toContain('| `sku` | string | ✅ | 档位 skuId |');
     expect(md).toContain('| `order_no` | string | ✅ | 订单号 |');
     expect(md).toContain('```json\n{\n  "order_no": "A1"\n}\n```');
     expect(md).toContain('> 鉴权：需登录。');
@@ -206,7 +206,7 @@ describe('CardDoc 散文驱动（端点事实来自宿主）', () => {
     expect(md).toContain('| GET | /api/demo/echo | public |');
     expect(md).toContain('q 不可为空。');
     expect(md).toContain('恒返回 200。');
-    expect(md).toContain('| `q` | string | ✅ | 查询词 示例：`"hi"` |');
+    expect(md).toContain('| `q` | string | ✅ | 查询词 |');
   });
 
   it('未填的可选段落不出现；标题缺省取卡片名', () => {

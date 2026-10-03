@@ -6,7 +6,6 @@ import type {
   EndpointDoc,
   EndpointFacts,
   FieldDoc,
-  FieldTableOptions,
   RenderOptions,
 } from './types';
 
@@ -25,50 +24,28 @@ function cell(text: string): string {
   return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
-/** 内联示例的紧凑序列化 */
-function inline(value: unknown): string {
-  if (typeof value === 'string') return `"${value}"`;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
 /**
  * 字段行列表 → Markdown 表格。空列表返回空串。
- * 列:字段 | 类型 | 必填 | 说明(示例默认内联进说明列)。
+ * 列:字段 | 类型 | 必填 | 说明;说明列即契约的静态释义(`.describe()`),示例不在此内联,
+ * 由端点散文的 requestExample / responseExample(JSON 代码块)统一承载。
  */
 export function renderFieldTable(
   fields: FieldDoc[],
-  opts: FieldTableOptions & { hideFields?: string[] } = {},
+  opts: { hideFields?: string[] } = {},
 ): string {
   if (fields.length === 0) return '';
-  const h = opts.headers ?? {};
-  const colField = h.field ?? '字段';
-  const colType = h.type ?? '类型';
-  const colReq = h.required ?? '必填';
-  const colDesc = h.description ?? '说明';
-  const reqMark = opts.requiredMark ?? '✅';
-  const optMark = opts.optionalMark ?? '—';
-  const showExamples = opts.showExamples ?? true;
   const hidden = new Set(opts.hideFields ?? []);
 
   const lines: string[] = [
-    `| ${colField} | ${colType} | ${colReq} | ${colDesc} |`,
+    '| 字段 | 类型 | 必填 | 说明 |',
     '|---|---|---|---|',
   ];
   for (const f of fields) {
     const isHidden = hidden.has(f.name);
     const indent = f.depth > 0 ? '&nbsp;'.repeat(f.depth * 2) : '';
-    const descParts: string[] = [];
-    if (isHidden) descParts.push('（敏感字段，示例中打码）');
-    else if (f.description) descParts.push(f.description);
-    if (showExamples && !isHidden && f.example !== undefined) {
-      descParts.push(`示例：\`${cell(inline(f.example))}\``);
-    }
+    const desc = isHidden ? '密码' : f.description ?? '';
     lines.push(
-      `| ${indent}\`${cell(f.path)}\` | ${cell(f.type)} | ${f.required ? reqMark : optMark} | ${cell(descParts.join(' '))} |`,
+      `| ${indent}\`${cell(f.path)}\` | ${cell(f.type)} | ${f.required ? '✅' : '—'} | ${cell(desc)} |`,
     );
   }
   return lines.join('\n');
@@ -136,10 +113,7 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
   }
 
   if (reqSchema) {
-    const table = renderFieldTable(schemaToFields(reqSchema, { io: 'input' }), {
-      ...(opts.fieldTable ?? {}),
-      hideFields,
-    });
+    const table = renderFieldTable(schemaToFields(reqSchema, { io: 'input' }), { hideFields });
     if (table) {
       requestSection.push('');
       requestSection.push(table);
@@ -158,10 +132,7 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
   // 响应
   const responseSection: string[] = [heading(sub, '响应')];
   if (resSchema) {
-    const table = renderFieldTable(schemaToFields(resSchema, { io: 'output' }), {
-      ...(opts.fieldTable ?? {}),
-      hideFields,
-    });
+    const table = renderFieldTable(schemaToFields(resSchema, { io: 'output' }), { hideFields });
     if (table) {
       responseSection.push(`**成功响应 (${successStatus})：**`);
       responseSection.push('');
