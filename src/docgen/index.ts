@@ -13,6 +13,7 @@ export {
   hasCardDoc,
   endpointDocWithCard,
   renderCardDoc,
+  DOCGEN_LABELS,
 } from './render';
 export type {
   FieldDoc,

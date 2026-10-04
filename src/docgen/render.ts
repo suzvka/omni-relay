@@ -75,6 +75,14 @@ function heading(level: number, text: string): string {
   return '#'.repeat(level) + ' ' + text;
 }
 
+/** 渲染布局标签（输出格式的单一真相源；测试引用同源——文案层变更零测试触达） */
+export const DOCGEN_LABELS = {
+  requestHeader: '| 请求方式 | 端点 |',
+  requestHeaderWithAuth: '| 请求方式 | 端点 | 鉴权 |',
+  successResponsePrefix: '**成功响应',
+  errorQuicksheet: '错误速查',
+} as const;
+
 /**
  * 单个端点 → 一段 Markdown(默认 `##` 小节)。
  * 结构:标题 → 请求(方式/端点/鉴权表 + 说明 + 字段表 + 示例) → 响应(字段表 + 示例) → 备注 → 错误速查。
@@ -100,8 +108,8 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
   // 请求:方式/端点/鉴权 表
   const withAuth = !!spec.auth;
   const reqHeader = withAuth
-    ? '| 请求方式 | 端点 | 鉴权 |\n|---|---|---|'
-    : '| 请求方式 | 端点 |\n|---|---|';
+    ? `${DOCGEN_LABELS.requestHeaderWithAuth}\n|---|---|---|`
+    : `${DOCGEN_LABELS.requestHeader}\n|---|---|`;
   const reqRow = withAuth
     ? `| ${spec.method} | ${spec.path} | ${spec.auth} |`
     : `| ${spec.method} | ${spec.path} |`;
@@ -134,14 +142,14 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
   if (resSchema) {
     const table = renderFieldTable(schemaToFields(resSchema, { io: 'output' }), { hideFields });
     if (table) {
-      responseSection.push(`**成功响应 (${successStatus})：**`);
+      responseSection.push(`${DOCGEN_LABELS.successResponsePrefix} (${successStatus})：**`);
       responseSection.push('');
       responseSection.push(table);
     }
   }
   if (spec.responseExample !== undefined) {
     if (responseSection.length > 1) responseSection.push('');
-    if (!resSchema) responseSection.push(`**成功响应 (${successStatus})：**`, '');
+    if (!resSchema) responseSection.push(`${DOCGEN_LABELS.successResponsePrefix} (${successStatus})：**`, '');
     responseSection.push(renderJsonExample(spec.responseExample, { hideFields }));
   }
   if (spec.responseNotes) {
@@ -157,7 +165,7 @@ export function renderEndpoint(spec: EndpointDoc, opts: RenderOptions = {}): str
 
   // 错误速查
   if (spec.errors && spec.errors.length > 0) {
-    const errLines = [heading(sub, '错误速查'), '| HTTP | 场景 |', '|---|---|'];
+    const errLines = [heading(sub, DOCGEN_LABELS.errorQuicksheet), '| HTTP | 场景 |', '|---|---|'];
     for (const e of spec.errors) errLines.push(`| ${e.status} | ${cell(e.scenario)} |`);
     blocks.push(errLines.join('\n'));
   }

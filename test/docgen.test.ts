@@ -12,6 +12,7 @@ import {
   hasCardDoc,
   endpointDocWithCard,
   renderCardDoc,
+  DOCGEN_LABELS,
 } from '../src/docgen';
 
 describe('schemaToFields', () => {
@@ -85,10 +86,12 @@ describe('renderJsonExample', () => {
 });
 
 describe('renderEndpoint', () => {
+  const skuDesc = '档位 skuId';
+  const orderNoDesc = '订单号';
   const card = defineCard({
     meta: { name: 'demo.echo', version: '1.0.0' },
-    in: z.object({ sku: z.string().describe('档位 skuId').meta({ examples: ['A1'] }) }),
-    out: z.object({ order_no: z.string().describe('订单号') }),
+    in: z.object({ sku: z.string().describe(skuDesc).meta({ examples: ['A1'] }) }),
+    out: z.object({ order_no: z.string().describe(orderNoDesc) }),
     collect: () => {},
     respond: (ctx) => ({ order_no: 'X' }) as never,
   });
@@ -119,27 +122,30 @@ describe('renderEndpoint', () => {
   });
 
   it('传 card 自动反射 in/out,auth 列与备注、错误表按序出现', () => {
+    const description = '回显档位。';
+    const authNote = '鉴权：需登录。';
+    const errorEntry = { status: 400, scenario: '参数无效' };
     const md = renderEndpoint({
       method: 'POST',
       path: '/api/demo/echo',
       auth: 'session',
       card,
-      description: '回显档位。',
+      description,
       responseExample: { order_no: 'A1' },
-      notes: ['鉴权：需登录。'],
-      errors: [{ status: 400, scenario: '参数无效' }],
+      notes: [authNote],
+      errors: [errorEntry],
     });
     // 卡片名兜底为标题
     expect(md.startsWith('## demo.echo\n')).toBe(true);
-    expect(md).toContain('| 请求方式 | 端点 | 鉴权 |');
+    expect(md).toContain(DOCGEN_LABELS.requestHeaderWithAuth);
     expect(md).toContain('| POST | /api/demo/echo | session |');
-    expect(md).toContain('回显档位。');
-    expect(md).toContain('| `sku` | string | ✅ | 档位 skuId |');
-    expect(md).toContain('| `order_no` | string | ✅ | 订单号 |');
+    expect(md).toContain(description);
+    expect(md).toContain(`| \`sku\` | string | ✅ | ${skuDesc} |`);
+    expect(md).toContain(`| \`order_no\` | string | ✅ | ${orderNoDesc} |`);
     expect(md).toContain('```json\n{\n  "order_no": "A1"\n}\n```');
-    expect(md).toContain('> 鉴权：需登录。');
-    expect(md).toContain('### 错误速查');
-    expect(md).toContain('| 400 | 参数无效 |');
+    expect(md).toContain(`> ${authNote}`);
+    expect(md).toContain(`### ${DOCGEN_LABELS.errorQuicksheet}`);
+    expect(md).toContain(`| ${errorEntry.status} | ${errorEntry.scenario} |`);
   });
 
   it('renderEndpoints 以空行拼接多段', () => {
@@ -152,22 +158,24 @@ describe('renderEndpoint', () => {
 });
 
 describe('CardDoc 散文驱动（端点事实来自宿主）', () => {
+  const qDesc = '查询词';
+  const cardDoc = {
+    signature: '把查询词原样回显。',
+    requestNotes: 'q 不可为空。',
+    responseNotes: '恒返回 200。',
+  };
   const card = defineCard({
     meta: { name: 'demo.echo', version: '1.0.0' },
-    in: z.object({ q: z.string().describe('查询词').meta({ examples: ['hi'] }) }),
+    in: z.object({ q: z.string().describe(qDesc).meta({ examples: ['hi'] }) }),
     out: z.object({ ok: z.boolean().describe('是否成功') }),
-    doc: {
-      signature: '把查询词原样回显。',
-      requestNotes: 'q 不可为空。',
-      responseNotes: '恒返回 200。',
-    },
+    doc: cardDoc,
     collect: () => {},
     respond: () => ({}) as never,
   });
 
   it('cardDocOf / hasCardDoc（散文 doc）', () => {
     expect(hasCardDoc(card)).toBe(true);
-    expect(cardDocOf(card)?.signature).toBe('把查询词原样回显。');
+    expect(cardDocOf(card)?.signature).toBe(cardDoc.signature);
     const bare = defineCard({
       meta: { name: 'demo.bare', version: '1.0.0' },
       in: z.object({}),
@@ -203,11 +211,11 @@ describe('CardDoc 散文驱动（端点事实来自宿主）', () => {
       auth: 'public',
     });
     expect(md.startsWith('## 回显\n')).toBe(true);
-    expect(md).toContain('把查询词原样回显。');
+    expect(md).toContain(cardDoc.signature);
     expect(md).toContain('| GET | /api/demo/echo | public |');
-    expect(md).toContain('q 不可为空。');
-    expect(md).toContain('恒返回 200。');
-    expect(md).toContain('| `q` | string | ✅ | 查询词 |');
+    expect(md).toContain(cardDoc.requestNotes);
+    expect(md).toContain(cardDoc.responseNotes);
+    expect(md).toContain(`| \`q\` | string | ✅ | ${qDesc} |`);
   });
 
   it('未填的可选段落不出现；标题缺省取卡片名', () => {
@@ -221,7 +229,7 @@ describe('CardDoc 散文驱动（端点事实来自宿主）', () => {
     const md = renderCardDoc(min, { method: 'POST', path: '/api/demo/min' });
     expect(md.startsWith('## demo.min\n')).toBe(true);
     expect(md).toContain('| POST | /api/demo/min |');
-    expect(md).not.toContain('鉴权');
-    expect(md).not.toContain('**成功响应');
+    expect(md).not.toContain(DOCGEN_LABELS.requestHeaderWithAuth);
+    expect(md).not.toContain(DOCGEN_LABELS.successResponsePrefix);
   });
 });

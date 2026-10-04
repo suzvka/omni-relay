@@ -96,7 +96,8 @@ describe('重试安全门禁(传输层歧义错误按方法幂等性放行)', ()
     expect(e).toMatchObject({ code: 'GLUE.TRANSPORT.NETWORK', retryable: true });
     expect(src.mock.calls).toHaveLength(1);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]?.[0])).toContain('跳过自动重试');
+    // 告警给出可操作指引（retrySafety 为公开配置面）；展示文案不锁
+    expect(String(warn.mock.calls[0]?.[0])).toContain('retrySafety');
   });
 
   it('POST + retrySafety:idempotent:显式放行后重试(首次网络错,二次成功)', async () => {

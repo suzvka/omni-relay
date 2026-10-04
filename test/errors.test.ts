@@ -42,9 +42,10 @@ describe('glue error', () => {
   });
 
   it('toJSON 不含 raw 与 message(对外安全形状)', () => {
-    const e = GlueError.business('X', '内部细节', { raw: { secret: 'v' } });
+    const message = '内部细节';
+    const e = GlueError.business('X', message, { raw: { secret: 'v' } });
     expect(e.toJSON()).toEqual({ code: 'GLUE.BUSINESS.X', status: 502, sourceId: undefined });
-    expect(JSON.stringify(e)).not.toContain('内部细节');
+    expect(JSON.stringify(e)).not.toContain(message);
     expect(JSON.stringify(e)).not.toContain('secret');
   });
 
