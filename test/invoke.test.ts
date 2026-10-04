@@ -1,3 +1,4 @@
+/** test-meta: tier=fast; risk=high; owner=platform; expires=2027-03-31 */
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { defineCard, defineSource, GlueError, RelayController } from '../src/index';

@@ -1,3 +1,4 @@
+/** test-meta: tier=fast; risk=low; owner=platform; expires=2027-03-31 */
 import { describe, expect, it } from 'vitest';
 import { readManifest, RelayController } from '../src/index';
 import type { CollectCtx, ControllerHooks } from '../src/index';

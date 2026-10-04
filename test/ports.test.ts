@@ -1,3 +1,4 @@
+/** test-meta: tier=fast; risk=medium; owner=platform; expires=2027-03-31 */
 import { describe, expect, it } from 'vitest';
 import { GlueError, RelayController } from '../src/index';
 import type { SourceBinding, SourceRegistryPort, TransportFn } from '../src/index';

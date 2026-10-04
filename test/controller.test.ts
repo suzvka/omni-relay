@@ -1,3 +1,4 @@
+/** test-meta: tier=fast; risk=high; owner=platform; expires=2027-03-31 */
 import { describe, expect, it } from 'vitest';
 import { GlueError, RegistrationError, RelayController } from '../src/index';
 import type { ControlEvent, RelayCard } from '../src/index';
