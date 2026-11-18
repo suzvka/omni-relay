@@ -35,6 +35,17 @@ export function defineSource<
       'source:retrySafety',
     );
   }
+  if (def.streamContentType !== undefined) {
+    if (typeof def.streamContentType !== 'string' || !def.streamContentType) {
+      throw new RegistrationError('streamContentType 必须是非空字符串', 'source:streamContentType');
+    }
+    if (!def.stream) {
+      throw new RegistrationError(
+        'streamContentType 仅用于声明 stream: true 的源站',
+        'source:streamContentType',
+      );
+    }
+  }
   assertErrorMap(def.errorMap);
   const meta: CardMeta = {
     name: def.meta?.name ?? '',

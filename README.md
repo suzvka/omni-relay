@@ -95,8 +95,12 @@ const handler = relay.toFetchHandler();
 流式、容灾、测试同样现成：
 
 ```ts
-// SSE 流式透传 —— 声明 stream: true，流直写、旁路校验、失败自动回收
+// 流式透传 —— 声明 stream: true，流直写、旁路校验、失败自动回收
 defineSource({ stream: true, /* ... */ });
+
+// 非 SSE 分帧（如 ndjson）—— 源站侧声明识别标签，业务卡片侧声明下游 content-type
+defineSource({ stream: true, streamContentType: 'application/x-ndjson', /* ... */ });
+defineCard({ /* ... */, streamContentType: 'application/x-ndjson' });
 
 // 多源容灾 —— 首个成功即胜出，业务性失败不切换、直接抛出
 for (const id of ['endpoint.a', 'endpoint.b']) {
@@ -133,7 +137,7 @@ const src = mockSource('jd/items/detail', { body: { item_name: 'X', price: 9.9, 
 | 语义守卫 | `strict`（默认开）下：`respond` 前 IR 浅冻结、同 id 并发 `invoke` 拒绝、源站注册表请求级快照 |
 | 重试与幂等安全 | `timeoutMs` / `retry` 策略覆盖；传输层歧义错误按方法幂等性放行（`retrySafety`），业务错误码凭映射项 / `retryableCodes` 显式开启 |
 | 组合根注入 | `RelayControllerOptions` 可替换 transport / registry；Pipeline 只依赖 `SourceResolver` 最小端口 |
-| 流式透传 | SSE 声明式直通，未声明即拒绝，失败自动 `cancel` 防悬挂 |
+| 流式透传 | SSE / ndjson 等分帧声明式直通（`streamContentType`），未声明即拒绝，失败自动 `cancel` 防悬挂 |
 | 版本治理 | manifest 交叉校验、版本门禁拒绝旧版误发、原子切换不断服 |
 | 管理视图 | `inspectCard` / `listCards` / `listBindings` / 治理事件回调，认证材料只留 `hasAuth` 布尔 |
 | 测试子入口 | `omni-relay/testing`：mock 传输、单值/序列/函数回放、SSE 回放 |

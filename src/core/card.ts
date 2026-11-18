@@ -37,6 +37,14 @@ export function defineCard<
     }
   }
 
+  // streamContentType:仅在 respond 返回 ReadableStream 时生效,声明期只校验形状
+  if (
+    def.streamContentType !== undefined &&
+    (typeof def.streamContentType !== 'string' || !def.streamContentType)
+  ) {
+    throw new RegistrationError('streamContentType 必须是非空字符串', 'card:streamContentType');
+  }
+
   const meta: CardMeta = {
     name: def.meta?.name ?? '',
     version: def.meta?.version ?? '0.0.0',

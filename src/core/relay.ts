@@ -36,6 +36,11 @@ export class Relay {
       if (!name) {
         return jsonResponse({ error: { code: 'GLUE.CARD.NOT_FOUND' } }, 404);
       }
+      // 请求开始时解析一次:既用于服务面执行,也用于流式出参的 content-type 声明
+      const entry = this.catalog().get(name);
+      if (!entry) {
+        return jsonResponse({ error: { code: 'GLUE.CARD.NOT_FOUND' } }, 404);
+      }
 
       let input: unknown;
       if (req.method === 'GET' || req.method === 'HEAD') {
@@ -49,13 +54,13 @@ export class Relay {
       }
 
       try {
-        const out = await this.handle(name, input, { signal: req.signal });
-        // 流式出参:out 为 ReadableStream → SSE 直通(不 JSON 序列化)
+        const out = await runCard(this.deps, entry, input, { signal: req.signal });
+        // 流式出参:out 为 ReadableStream → 按卡片声明的 content-type 直通(不 JSON 序列化)
         if (isReadableStream(out)) {
           return new Response(out, {
             status: 200,
             headers: {
-              'content-type': 'text/event-stream',
+              'content-type': entry.card.def.streamContentType ?? 'text/event-stream',
               'cache-control': 'no-cache',
               connection: 'keep-alive',
             },

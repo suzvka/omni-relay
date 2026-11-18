@@ -258,3 +258,141 @@ describe('声明期校验', () => {
     ).toThrow(RegistrationError);
   });
 });
+
+describe('非 SSE 流式帧(ndjson)', () => {
+  const NDJSON = 'application/x-ndjson';
+  const ndjsonBody = '{"type":"progress","p":0.5}\n{"type":"done"}\n';
+
+  function ndjsonSource(): SourceCard {
+    return defineSource({
+      meta: { name: 'nd.up', version: '1.0.0' },
+      ref: 'render/ndjson',
+      stream: true,
+      streamContentType: NDJSON,
+      input: z.object({ prompt: z.string() }),
+      upstreamRes: z.custom<ReadableStream<Uint8Array>>(),
+      output: z.custom<ReadableStream<Uint8Array>>(),
+      take: ({ prompt }) => ({ method: 'POST' as const, path: '/v1/render', body: { prompt } }),
+    });
+  }
+
+  function ndjsonCard(streamContentType?: string): RelayCard {
+    return defineCard({
+      meta: { name: 'render.ndjson', version: '1.0.0' },
+      in: z.object({ prompt: z.string() }),
+      out: z.custom<ReadableStream<Uint8Array>>(),
+      uses: ['nd.up'],
+      streamContentType,
+      collect: async (ctx) => {
+        ctx.ir.prompt = (ctx.input as { prompt: string }).prompt;
+        await ctx.invoke('nd.up');
+      },
+      respond: (ctx) => ctx.ir['nd.up'] as ReadableStream<Uint8Array>,
+    });
+  }
+
+  it('defaultTransport:声明 ndjson 标签时识别为流,未声明时按文本读取', async () => {
+    const tagged = mockSource('render/ndjson', {
+      sse: ndjsonBody,
+      headers: { 'content-type': NDJSON },
+    });
+    const withTag = await defaultTransport(
+      { ...binding, fetch: tagged.binding.fetch },
+      req,
+      { streamContentType: NDJSON },
+    );
+    expect(withTag.stream).toBe(true);
+    expect(await new Response(withTag.body as ReadableStream<Uint8Array>).text()).toBe(ndjsonBody);
+
+    const untagged = mockSource('render/ndjson', {
+      sse: ndjsonBody,
+      headers: { 'content-type': NDJSON },
+    });
+    const withoutTag = await defaultTransport(
+      { ...binding, fetch: untagged.binding.fetch },
+      req,
+      {},
+    );
+    expect(withoutTag.stream).toBeUndefined();
+  });
+
+  it('源站卡片声明 streamContentType:accept 按声明协商', async () => {
+    const src = mockSource('render/ndjson', {
+      sse: ndjsonBody,
+      headers: { 'content-type': NDJSON },
+    });
+    const { relay } = setupStream(ndjsonCard(), [ndjsonSource()], [src]);
+    const out = await relay.handle('render.ndjson', { prompt: 'x' });
+    expect(await new Response(out as ReadableStream<Uint8Array>).text()).toContain('done');
+    const headers = src.mock.calls[0]?.init?.headers as Record<string, string>;
+    expect(headers.accept).toBe(NDJSON);
+  });
+
+  it('业务卡片声明 streamContentType:toFetchHandler 按声明返回', async () => {
+    const src = mockSource('render/ndjson', {
+      sse: ndjsonBody,
+      headers: { 'content-type': NDJSON },
+    });
+    const { relay } = setupStream(ndjsonCard(NDJSON), [ndjsonSource()], [src]);
+    const res = await relay.toFetchHandler()(
+      new Request('https://x.test/render.ndjson', {
+        method: 'POST',
+        body: JSON.stringify({ prompt: 'x' }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe(NDJSON);
+    expect(await res.text()).toContain('done');
+  });
+
+  it('stream 源站显式 accept 不被覆盖', async () => {
+    const sc = defineSource({
+      meta: { name: 'nd.accept', version: '1.0.0' },
+      ref: 'render/ndjson',
+      stream: true,
+      streamContentType: NDJSON,
+      input: z.object({ prompt: z.string() }),
+      upstreamRes: z.custom<ReadableStream<Uint8Array>>(),
+      output: z.custom<ReadableStream<Uint8Array>>(),
+      take: ({ prompt }) => ({
+        method: 'POST' as const,
+        path: '/v1/render',
+        headers: { accept: 'application/json' },
+        body: { prompt },
+      }),
+    });
+    const card = defineCard({
+      meta: { name: 'render.accept', version: '1.0.0' },
+      in: z.object({ prompt: z.string() }),
+      out: z.custom<ReadableStream<Uint8Array>>(),
+      uses: ['nd.accept'],
+      collect: async (ctx) => {
+        ctx.ir.prompt = (ctx.input as { prompt: string }).prompt;
+        await ctx.invoke('nd.accept');
+      },
+      respond: (ctx) => ctx.ir['nd.accept'] as ReadableStream<Uint8Array>,
+    });
+    const src = mockSource('render/ndjson', {
+      sse: ndjsonBody,
+      headers: { 'content-type': NDJSON },
+    });
+    const { relay } = setupStream(card, [sc], [src]);
+    await relay.handle('render.accept', { prompt: 'x' });
+    const headers = src.mock.calls[0]?.init?.headers as Record<string, string>;
+    expect(headers.accept).toBe('application/json');
+  });
+
+  it('未声明 stream 却给 streamContentType → RegistrationError', () => {
+    expect(() =>
+      defineSource({
+        meta: { name: 'x.y', version: '1.0.0' },
+        ref: 'a/b',
+        streamContentType: NDJSON,
+        input: z.object({}),
+        upstreamRes: z.object({}),
+        output: z.object({}),
+        take: () => ({ method: 'GET' as const, path: '/' }),
+      }),
+    ).toThrow(RegistrationError);
+  });
+});

@@ -66,6 +66,13 @@ function isAbortLike(e: unknown): boolean {
   return e instanceof Error && e.name === 'AbortError';
 }
 
+/** 流式响应识别:命中声明的标签即为流;text/event-stream 作为向后兼容的兜底 */
+function isStreamContentType(actual: string, expected?: string): boolean {
+  const ct = actual.toLowerCase();
+  const want = (expected ?? 'text/event-stream').toLowerCase();
+  return ct.includes(want) || ct.includes('text/event-stream');
+}
+
 async function readBody(res: Response): Promise<unknown> {
   const contentType = res.headers.get('content-type') ?? '';
   try {
@@ -115,8 +122,8 @@ export const defaultTransport: TransportFn = async (binding, req, opts) => {
   try {
     const res = await doFetch(url, { ...init, signal: ac.signal });
     const headers = Object.fromEntries(res.headers.entries());
-    // event-stream → body 直通(ReadableStream);超时定时器随 finally 释放,只覆盖到流建立
-    if (res.body !== null && (res.headers.get('content-type') ?? '').includes('text/event-stream')) {
+    // 流式标签 → body 直通(ReadableStream);超时定时器随 finally 释放,只覆盖到流建立
+    if (res.body !== null && isStreamContentType(res.headers.get('content-type') ?? '', opts.streamContentType)) {
       keepAbortListener = true;
       return { status: res.status, body: res.body, headers, stream: true };
     }
@@ -143,7 +150,7 @@ export interface MockResponse {
   status?: number;
   body?: unknown;
   headers?: Record<string, string>;
-  /** 流式回放:SSE 文本或现成 ReadableStream(以 text/event-stream 返回,供流式透传测试) */
+  /** 流式回放:流式文本或现成 ReadableStream(以 text/event-stream 返回;可经 headers 覆盖 content-type) */
   sse?: string | ReadableStream<Uint8Array>;
 }
 

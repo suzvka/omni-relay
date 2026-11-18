@@ -163,8 +163,20 @@ async function invokeSource(
     const ureq = await srcDef.take(srcInput as never);
     if (strict && srcDef.request) checkAt('request', srcDef.request, ureq, id);
 
+    // 流式源站:未显式声明 accept 时按流式标签协商(不就地改写 take 产物)
+    const sendReq: UpstreamRequest =
+      srcDef.stream && !ureq.headers?.accept
+        ? {
+            ...ureq,
+            headers: {
+              ...ureq.headers,
+              accept: srcDef.streamContentType ?? 'text/event-stream',
+            },
+          }
+        : ureq;
+
     // transport + 重试 + 业务映射
-    const result = await fetchMapped(deps, policy, binding, ureq, ctx.signal, srcDef, id);
+    const result = await fetchMapped(deps, policy, binding, sendReq, ctx.signal, srcDef, id);
 
     // 流式守卫:旁路校验是显式授予的特权,未声明 stream 的源站收到流式响应直接拒绝
     if (result.stream && !srcDef.stream) {
@@ -230,7 +242,13 @@ async function fetchMapped(
   for (;;) {
     let result: TransportResult;
     try {
-      result = await transport(binding, ureq, { signal, timeoutMs });
+      result = await transport(binding, ureq, {
+        signal,
+        timeoutMs,
+        streamContentType: src.stream
+          ? (src.streamContentType ?? 'text/event-stream')
+          : undefined,
+      });
     } catch (e) {
       if (e instanceof GlueError) {
         const canRetry = e.retryable && attempt < maxRetries;

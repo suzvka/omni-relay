@@ -85,7 +85,7 @@ export interface TransportResult {
   status: number;
   body: unknown;
   headers: Record<string, string>;
-  /** 源站返回 event-stream:true 时 body 为 ReadableStream<Uint8Array>(流式透传) */
+  /** 响应按流式标签识别时 body 为 ReadableStream<Uint8Array>(流式透传) */
   stream?: boolean;
 }
 
@@ -93,7 +93,12 @@ export interface TransportResult {
 export type TransportFn = (
   binding: SourceBinding,
   req: UpstreamRequest,
-  opts: { signal?: AbortSignal; timeoutMs?: number },
+  opts: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    /** 流式响应的识别标签(来源站卡片的 streamContentType;缺省 text/event-stream) */
+    streamContentType?: string;
+  },
 ) => Promise<TransportResult>;
 
 /** 源站解析最小端口:Pipeline 只依赖这一个查询面 */
@@ -154,9 +159,11 @@ export interface RawSourceCardDef<
   /** 重试安全声明:约束"结果不确定"的传输层错误(NETWORK/TIMEOUT)下的自动重试;
    *  缺省 'auto' 按 HTTP 方法判定(POST/PATCH 禁止自动重试,除非显式 'idempotent') */
   readonly retrySafety?: RetrySafety;
-  /** 流式透传声明:声明后 event-stream 响应旁路校验,put 可省略;
+  /** 流式透传声明:声明后流式响应旁路校验,put 可省略;
    *  未声明却收到流式响应 → GLUE.BUSINESS.UPSTREAM_STREAM_UNDECLARED(旁路必须显式授予) */
   readonly stream?: boolean;
+  /** 流式响应的 content-type 识别标签(如 application/x-ndjson;缺省 text/event-stream);stream: true 时生效 */
+  readonly streamContentType?: string;
 }
 
 /** defineSource 产物:def + 预计算的运行时元信息 */
@@ -214,6 +221,8 @@ export interface RawCardDef<
   collect: (ctx: CollectCtx) => void | Promise<void>;
   /** 响应构筑钩子:只读 ir、不可 invoke,产出 out */
   respond: (ctx: RespondCtx) => z.input<TOut> | Promise<z.input<TOut>>;
+  /** 流式出参的 content-type(respond 返回 ReadableStream 时生效;缺省 text/event-stream) */
+  streamContentType?: string;
 }
 
 /** defineCard 产物:def + 预计算的运行时元信息 */
