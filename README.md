@@ -142,45 +142,9 @@ const src = mockSource('jd/items/detail', { body: { item_name: 'X', price: 9.9, 
 | 管理视图 | `inspectCard` / `listCards` / `listBindings` / 治理事件回调，认证材料只留 `hasAuth` 布尔 |
 | 测试子入口 | `omni-relay/testing`：mock 传输、单值/序列/函数回放、SSE 回放 |
 
-## 📖 文档生成（omni-relay/docgen）
+## 📖 文档生成
 
-卡片已经带着 Zod 契约——docgen 把它反射成接口描述的 **Markdown 字符串**，省去手写请求/响应字段表的漂移。它**只产文本**：不写盘、不绑定任何文档框架，页面装配与渲染交给宿主。
-
-```ts
-import { renderEndpoint } from 'omni-relay/docgen';
-
-const md = renderEndpoint({
-  method: 'POST',
-  path: '/api/credits/topups',
-  auth: 'session',            // 宿主自定义标签,docgen 只原样打印
-  card: creditTopupCreateCard, // 自动反射卡片 in/out 作为请求/响应契约
-  description: '购买自营积分商品，创建订单。',
-  responseExample: { order_no: 'A1', status: 'PENDING' },
-  hideFields: ['oldPassword'], // 敏感叶子:表中标注、示例中打码
-});
-```
-
-字段级中文说明取自 `.describe()`（静态文本，参数名与类型由 Zod 契约反射）；示例不进字段表，由 `requestExample` / `responseExample` 的 JSON 代码块统一承载；HTTP 方法/路径、鉴权、响应信封等框架不认识的横切信息由宿主随 spec 传入。还提供 `schemaToFields` / `renderFieldTable` / `renderJsonExample` / `renderEndpoints` 供宿主自由组装整页。
-
-### 让文档随卡片声明（推荐）
-
-卡片的 `doc` 只放**端点散文**（反射不到、又不属于发布面事实的内容）；端点事实（method/path/title/auth）由宿主的发布面注册表传入，二者合成后渲染：
-
-```ts
-const creditTopup = defineCard({
-  meta: { name: 'credits.topups.create', version: '2.0.0' },
-  in: z.object({ sku_id: z.string().describe('档位 skuId').meta({ examples: ['credit-5000'] }) }),
-  out: z.object({ order_no: z.string().describe('订单号') }),
-  doc: { description: '客户端只声明档位，金额与到账积分由服务端快照。' }, // 散文，全部可选
-  collect: /* … */, respond: /* … */,
-});
-
-import { renderCardDoc } from 'omni-relay/docgen';
-// 端点事实来自你的发布面注册表（surface / OpenAPI / 路由表…）
-const md = renderCardDoc(creditTopup, {
-  method: 'POST', path: '/api/credits/topups', title: '创建充值订单', auth: 'session',
-});
-```
+卡片带着 Zod 契约与可选的 `doc` 散文槽位（框架不解释、原样穿透）。
 
 ## 📚 深入了解
 

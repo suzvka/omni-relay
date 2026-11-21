@@ -212,9 +212,7 @@ export interface RawCardDef<
   uses?: readonly string[];
   /**
    * 可选:对外接口文档元数据(opaque 槽位)。
-   * 框架不解释、不参与校验/运行,原样穿透;仅供 `omni-relay/docgen` 消费——
    * 让端点级"作者必填/可选"信息随卡片声明(一卡 = 一端点 = 一份文档)。
-   * 具体形状由 `omni-relay/docgen` 的 `CardDoc` 定义。
    */
   doc?: unknown;
   /** 入站请求处理钩子:直读直写 ir、invoke API 卡片,把数据收集进 IR(业务过程本身) */
